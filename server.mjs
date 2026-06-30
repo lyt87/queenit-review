@@ -399,6 +399,6 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(port, "127.0.0.1", () => {
+server.listen(port, "0.0.0.0", () => {
   console.log(`퀸잇 리뷰 메이커가 http://127.0.0.1:${port} 에서 실행 중입니다.`);
 });
