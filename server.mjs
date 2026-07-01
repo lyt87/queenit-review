@@ -28,6 +28,34 @@ const colorCodes = {
   그린: "GN", 카키: "KH", 와인: "WI", 오렌지: "OR", 레드: "RE",
   퍼플: "PP", 옐로우: "YE", 민트: "MT", 소라: "SB", 크림: "CR",
 };
+const colorAliases = [
+  { code: "LB", names: ["라이트블루", "연청", "연파랑"] },
+  { code: "DB", names: ["다크블루", "진청", "진파랑"] },
+  { code: "SB", names: ["스카이블루", "소라"] },
+  { code: "MG", names: ["멜란지그레이", "멜란지"] },
+  { code: "BG", names: ["버건디"] },
+  { code: "OM", names: ["오트밀"] },
+  { code: "IV", names: ["아이보리", "오프화이트"] },
+  { code: "BK", names: ["블랙", "검정", "검은색"] },
+  { code: "WH", names: ["화이트", "흰색", "백색"] },
+  { code: "BE", names: ["베이지"] },
+  { code: "BR", names: ["브라운", "갈색"] },
+  { code: "NY", names: ["네이비", "남색"] },
+  { code: "CG", names: ["차콜"] },
+  { code: "GY", names: ["그레이", "회색"] },
+  { code: "PK", names: ["핑크", "분홍"] },
+  { code: "BL", names: ["블루", "파랑", "청색"] },
+  { code: "GN", names: ["그린", "초록"] },
+  { code: "KH", names: ["카키"] },
+  { code: "WI", names: ["와인"] },
+  { code: "OR", names: ["오렌지", "주황"] },
+  { code: "RE", names: ["레드", "빨강", "적색"] },
+  { code: "PP", names: ["퍼플", "보라"] },
+  { code: "YE", names: ["옐로우", "노랑"] },
+  { code: "MT", names: ["민트"] },
+  { code: "CR", names: ["크림"] },
+  { code: "MX", names: ["멀티", "믹스", "배색"] },
+];
 const sizeCodes = { FREE: "FF", 프리: "FF", F: "FF", S: "S", M: "M", L: "L", XL: "XL", XXL: "XXL" };
 
 function outputText(response) {
@@ -134,9 +162,14 @@ async function analyzeReviewFacts(base, pageProduct) {
   return { reviewFacts: result.reviewFacts, detailText: detail.detailText };
 }
 
-function optionCode(sellerCode, color, size) {
+function optionCode(sellerCode, color, size, analyzedColorCode = "") {
   const normalizedSize = String(size || "FREE").toUpperCase();
-  const colorCode = colorCodes[color] || String(color || "").replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpperCase() || "ET";
+  const normalizedColor = String(color || "").replace(/[\s_\-/()[\]]/g, "").toLowerCase();
+  const aliasCode = colorAliases.find((entry) => entry.names.some((name) => normalizedColor.includes(name)))?.code;
+  const explicitCode = /^[A-Z]{2}$/.test(String(analyzedColorCode || "").toUpperCase())
+    ? String(analyzedColorCode).toUpperCase()
+    : "";
+  const colorCode = aliasCode || colorCodes[color] || explicitCode || String(color || "").replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpperCase() || "ET";
   const sizeCode = sizeCodes[normalizedSize] || (/^\d+$/.test(normalizedSize) ? normalizedSize : normalizedSize);
   return `${sellerCode}${colorCode}${sizeCode}`;
 }
@@ -174,22 +207,22 @@ async function discoverProduct(productId) {
     text: `상품명: ${base.productName}\n카테고리: ${base.category}\n판매자 상품 코드: ${base.sellerCode}\n상세페이지 텍스트: ${detail.detailText || "텍스트 없음"}\n상세 이미지에서 실제 판매 컬러와 사이즈 조합을 추출하고, 리뷰에 활용할 수 있는 확인된 상품 특징도 정리하세요. 확실하지 않은 값은 추측하지 말고 confidence를 low로 표시하세요.`,
   }, ...detail.imageUrls.map((image_url) => ({ type: "input_image", image_url }))];
   const analysis = await callOpenAI({
-    instructions: "당신은 한국 여성의류 쇼핑몰 상품 분석가입니다. 이미지와 상품 정보를 근거로 컬러·사이즈 옵션 조합을 중복 없이 추출하고, 소재감·디자인·핏 구조·기장·디테일·활용 특징 중 직접 확인되는 사실을 정리합니다.",
+    instructions: "당신은 한국 여성의류 쇼핑몰 상품 분석가입니다. 이미지와 상품 정보를 근거로 컬러·사이즈 옵션 조합을 중복 없이 추출합니다. 각 컬러에는 판매자 옵션코드에 사용할 표준 영문 2자리 colorCode도 지정하세요. 예: 블랙 BK, 화이트 WH, 아이보리 IV, 베이지 BE, 브라운 BR, 네이비 NY, 그레이 GY, 차콜 CG, 핑크 PK, 블루 BL, 라이트블루 LB, 소라 SB, 그린 GN, 카키 KH, 와인 WI, 버건디 BG, 오렌지 OR, 레드 RE, 퍼플 PP, 옐로우 YE, 민트 MT, 크림 CR, 멀티 MX. 또한 소재감·디자인·핏 구조·기장·디테일·활용 특징 중 직접 확인되는 사실을 정리합니다.",
     input: [{ role: "user", content }],
     schemaName: "queenit_product_options",
     schema: {
       type: "object", additionalProperties: false,
       properties: {
         confidence: { type: "string", enum: ["high", "medium", "low"] },
-        options: { type: "array", minItems: 1, maxItems: 30, items: { type: "object", additionalProperties: false, properties: { color: { type: "string" }, size: { type: "string" } }, required: ["color", "size"] } },
+        options: { type: "array", minItems: 1, maxItems: 30, items: { type: "object", additionalProperties: false, properties: { color: { type: "string" }, colorCode: { type: "string", pattern: "^[A-Z]{2}$" }, size: { type: "string" } }, required: ["color", "colorCode", "size"] } },
         reviewFacts: { type: "array", minItems: 2, maxItems: 8, items: { type: "string", minLength: 5, maxLength: 100 } },
       },
       required: ["confidence", "options", "reviewFacts"],
     },
   });
-  base.options = analysis.options.map(({ color, size }) => ({
+  base.options = analysis.options.map(({ color, colorCode, size }) => ({
     label: `${color},${size}`,
-    code: optionCode(base.sellerCode, color, size),
+    code: optionCode(base.sellerCode, color, size, colorCode),
     inferred: true,
     confidence: analysis.confidence,
   }));
