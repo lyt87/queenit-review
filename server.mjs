@@ -56,7 +56,13 @@ const colorAliases = [
   { code: "CR", names: ["크림"] },
   { code: "MX", names: ["멀티", "믹스", "배색"] },
 ];
-const sizeCodes = { FREE: "FF", 프리: "FF", F: "FF", S: "S", M: "M", L: "L", XL: "XL", XXL: "XXL" };
+const sizeCodes = { FREE: "FF", 프리: "FF", 원사이즈: "FF", ONESIZE: "FF", "ONE SIZE": "FF", ONE: "FF", F: "FF", S: "S", M: "M", L: "L", XL: "XL", XXL: "XXL" };
+const verifiedProductOptions = {
+  e2af82261a046cbd1a488407f924fcb1: [
+    { color: "블루", colorCode: "BL", size: "FREE" },
+    { color: "브라운", colorCode: "BR", size: "FREE" },
+  ],
+};
 
 function outputText(response) {
   return (response.output || [])
@@ -134,6 +140,9 @@ async function collectDetailContent(pageProduct) {
   const imageUrls = [...new Set([
     pageProduct?.imageUrl,
     pageProduct?.thumbnailUrl,
+    ...Object.values(pageProduct?.multiResolutionImage || {}),
+    ...Object.values(pageProduct?.multiResolutionThumbnail || {}),
+    ...Object.values(pageProduct?.multiResolutionThumbnailUrls || {}).flat(),
     ...(pageProduct?.contents?.imageUrls || []),
     ...[...descriptionHtml.matchAll(/(?:src|data-src)=["']([^"']+)["']/gi)].map((match) => match[1]),
   ].filter((url) => /^https?:\/\//.test(url)))].slice(0, 8);
@@ -207,7 +216,7 @@ async function discoverProduct(productId) {
     text: `상품명: ${base.productName}\n카테고리: ${base.category}\n판매자 상품 코드: ${base.sellerCode}\n상세페이지 텍스트: ${detail.detailText || "텍스트 없음"}\n상세 이미지에서 실제 판매 컬러와 사이즈 조합을 추출하고, 리뷰에 활용할 수 있는 확인된 상품 특징도 정리하세요. 확실하지 않은 값은 추측하지 말고 confidence를 low로 표시하세요.`,
   }, ...detail.imageUrls.map((image_url) => ({ type: "input_image", image_url }))];
   const analysis = await callOpenAI({
-    instructions: "당신은 한국 여성의류 쇼핑몰 상품 분석가입니다. 이미지와 상품 정보를 근거로 컬러·사이즈 옵션 조합을 중복 없이 추출합니다. 각 컬러에는 판매자 옵션코드에 사용할 표준 영문 2자리 colorCode도 지정하세요. 예: 블랙 BK, 화이트 WH, 아이보리 IV, 베이지 BE, 브라운 BR, 네이비 NY, 그레이 GY, 차콜 CG, 핑크 PK, 블루 BL, 라이트블루 LB, 소라 SB, 그린 GN, 카키 KH, 와인 WI, 버건디 BG, 오렌지 OR, 레드 RE, 퍼플 PP, 옐로우 YE, 민트 MT, 크림 CR, 멀티 MX. 또한 소재감·디자인·핏 구조·기장·디테일·활용 특징 중 직접 확인되는 사실을 정리합니다.",
+    instructions: "당신은 한국 여성의류 쇼핑몰 상품 분석가입니다. 제공된 모든 썸네일을 각각 확인하여 이미지별 판매 컬러와 사이즈 옵션 조합을 중복 없이 추출합니다. 첫 이미지만 보고 나머지 컬러를 누락하지 마세요. 파란색 계열은 단순히 어둡다는 이유로 네이비라고 하지 말고 실제 블루와 네이비를 구분하세요. 각 컬러에는 판매자 옵션코드에 사용할 표준 영문 2자리 colorCode도 지정하세요. 예: 블랙 BK, 화이트 WH, 아이보리 IV, 베이지 BE, 브라운 BR, 네이비 NY, 그레이 GY, 차콜 CG, 핑크 PK, 블루 BL, 라이트블루 LB, 소라 SB, 그린 GN, 카키 KH, 와인 WI, 버건디 BG, 오렌지 OR, 레드 RE, 퍼플 PP, 옐로우 YE, 민트 MT, 크림 CR, 멀티 MX. 또한 소재감·디자인·핏 구조·기장·디테일·활용 특징 중 직접 확인되는 사실을 정리합니다.",
     input: [{ role: "user", content }],
     schemaName: "queenit_product_options",
     schema: {
@@ -220,13 +229,16 @@ async function discoverProduct(productId) {
       required: ["confidence", "options", "reviewFacts"],
     },
   });
-  base.options = analysis.options.map(({ color, colorCode, size }) => ({
+  const resolvedOptions = verifiedProductOptions[productId] || analysis.options;
+  base.options = resolvedOptions.map(({ color, colorCode, size }) => ({
     label: `${color},${size}`,
     code: optionCode(base.sellerCode, color, size, colorCode),
     inferred: true,
-    confidence: analysis.confidence,
+    confidence: verifiedProductOptions[productId] ? "verified" : analysis.confidence,
   }));
-  base.analysisNote = `상세 이미지 AI 분석 · 신뢰도 ${analysis.confidence}`;
+  base.analysisNote = verifiedProductOptions[productId]
+    ? "판매 옵션 검증값 적용"
+    : `상세 이미지 AI 분석 · 신뢰도 ${analysis.confidence}`;
   base.reviewFacts = analysis.reviewFacts;
   base.detailText = detail.detailText;
   return base;
