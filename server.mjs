@@ -132,10 +132,23 @@ function htmlToText(html = "") {
 
 async function collectDetailContent(pageProduct) {
   let descriptionHtml = "";
-  const descriptionUrl = pageProduct?.contents?.descriptionPageUrl?.replace(/^http:/, "https:");
-  if (descriptionUrl) {
-    const response = await fetch(descriptionUrl, { headers: { "User-Agent": "Mozilla/5.0 QueenitReviewMaker/4.0" } });
-    if (response.ok) descriptionHtml = await response.text();
+  const descriptionUrls = [
+    pageProduct?.contents?.descriptionFileUri,
+    pageProduct?.contents?.descriptionPageUrl,
+  ].filter(Boolean).map((url) => url.replace(/^http:/, "https:"));
+  for (const descriptionUrl of descriptionUrls) {
+    try {
+      const response = await fetch(descriptionUrl, {
+        headers: { "User-Agent": "Mozilla/5.0 QueenitReviewMaker/4.0" },
+        signal: AbortSignal.timeout(15000),
+      });
+      if (response.ok) {
+        descriptionHtml = await response.text();
+        if (descriptionHtml) break;
+      }
+    } catch {
+      // 다음 상세설명 주소를 시도합니다.
+    }
   }
   const imageUrls = [...new Set([
     pageProduct?.imageUrl,
@@ -144,6 +157,7 @@ async function collectDetailContent(pageProduct) {
     ...Object.values(pageProduct?.multiResolutionThumbnail || {}),
     ...Object.values(pageProduct?.multiResolutionThumbnailUrls || {}).flat(),
     ...(pageProduct?.contents?.imageUrls || []),
+    ...Object.values(pageProduct?.contents?.multiResolutionImages || {}).flat(),
     ...[...descriptionHtml.matchAll(/(?:src|data-src)=["']([^"']+)["']/gi)].map((match) => match[1]),
   ].filter((url) => /^https?:\/\//.test(url)))].slice(0, 8);
   return { imageUrls, detailText: htmlToText(descriptionHtml).slice(0, 5000) };
@@ -191,6 +205,8 @@ async function discoverProduct(productId) {
   const html = await pageResponse.text();
   const product = extractJsonObject(html, '"product":{"productId"');
   if (!product?.productId) throw new Error("상세페이지에서 상품 정보를 찾지 못했습니다.");
+  const contents = extractJsonObject(html, '"contents":{"imageUrls"');
+  if (contents) product.contents = contents;
 
   const base = {
     productId: product.productId,
@@ -213,10 +229,10 @@ async function discoverProduct(productId) {
 
   const content = [{
     type: "input_text",
-    text: `상품명: ${base.productName}\n카테고리: ${base.category}\n판매자 상품 코드: ${base.sellerCode}\n상세페이지 텍스트: ${detail.detailText || "텍스트 없음"}\n상세 이미지에서 실제 판매 컬러와 사이즈 조합을 추출하고, 리뷰에 활용할 수 있는 확인된 상품 특징도 정리하세요. 확실하지 않은 값은 추측하지 말고 confidence를 low로 표시하세요.`,
+    text: `상품명: ${base.productName}\n카테고리: ${base.category}\n판매자 상품 코드: ${base.sellerCode}\n상세페이지 텍스트: ${detail.detailText || "텍스트 없음"}\n상세설명 이미지의 제품정보 표나 컬러·사이즈 영역에 적힌 문구를 OCR로 정확히 읽으세요. 표에 적힌 컬러와 사이즈를 실제 판매 옵션의 최우선 근거로 사용하고, 이미지 색상 추측보다 우선하세요. 리뷰에 활용할 수 있는 확인된 상품 특징도 정리하세요. 확실하지 않은 값은 추측하지 말고 confidence를 low로 표시하세요.`,
   }, ...detail.imageUrls.map((image_url) => ({ type: "input_image", image_url }))];
   const analysis = await callOpenAI({
-    instructions: "당신은 한국 여성의류 쇼핑몰 상품 분석가입니다. 제공된 모든 썸네일을 각각 확인하여 이미지별 판매 컬러와 사이즈 옵션 조합을 중복 없이 추출합니다. 첫 이미지만 보고 나머지 컬러를 누락하지 마세요. 파란색 계열은 단순히 어둡다는 이유로 네이비라고 하지 말고 실제 블루와 네이비를 구분하세요. 각 컬러에는 판매자 옵션코드에 사용할 표준 영문 2자리 colorCode도 지정하세요. 예: 블랙 BK, 화이트 WH, 아이보리 IV, 베이지 BE, 브라운 BR, 네이비 NY, 그레이 GY, 차콜 CG, 핑크 PK, 블루 BL, 라이트블루 LB, 소라 SB, 그린 GN, 카키 KH, 와인 WI, 버건디 BG, 오렌지 OR, 레드 RE, 퍼플 PP, 옐로우 YE, 민트 MT, 크림 CR, 멀티 MX. 또한 소재감·디자인·핏 구조·기장·디테일·활용 특징 중 직접 확인되는 사실을 정리합니다.",
+    instructions: "당신은 한국 여성의류 쇼핑몰 상품 분석가입니다. 상세설명 이미지에 제품코드·컬러·사이즈 표가 있으면 그 표의 텍스트를 최우선 정답으로 사용하세요. 쉼표로 구분된 컬러는 각각 별도 옵션입니다. 표가 없을 때만 모든 썸네일을 확인해 이미지별 판매 컬러를 추론합니다. 첫 이미지만 보고 나머지 컬러를 누락하지 마세요. 파란색 계열은 단순히 어둡다는 이유로 네이비라고 하지 말고 실제 블루와 네이비를 구분하세요. 각 컬러에는 판매자 옵션코드에 사용할 표준 영문 2자리 colorCode도 지정하세요. 예: 블랙 BK, 화이트 WH, 아이보리 IV, 베이지 BE, 브라운 BR, 네이비 NY, 그레이 GY, 차콜 CG, 핑크 PK, 블루 BL, 라이트블루 LB, 소라 SB, 그린 GN, 카키 KH, 와인 WI, 버건디 BG, 오렌지 OR, 레드 RE, 퍼플 PP, 옐로우 YE, 민트 MT, 크림 CR, 멀티 MX. 또한 소재감·디자인·핏 구조·기장·디테일·활용 특징 중 직접 확인되는 사실을 정리합니다.",
     input: [{ role: "user", content }],
     schemaName: "queenit_product_options",
     schema: {
@@ -253,6 +269,8 @@ async function resolveProduct(productId) {
     const html = response.ok ? await response.text() : "";
     const pageProduct = extractJsonObject(html, '"product":{"productId"');
     if (!pageProduct?.productId) throw new Error("상세페이지 상품 정보를 찾지 못했습니다.");
+    const contents = extractJsonObject(html, '"contents":{"imageUrls"');
+    if (contents) pageProduct.contents = contents;
     const enrichedBase = {
       ...base,
       imageUrl: pageProduct.imageUrl || pageProduct.thumbnailUrl || base.imageUrl || "",
