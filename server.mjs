@@ -83,6 +83,57 @@ function extractJsonObject(html, marker) {
   return null;
 }
 
+function htmlToText(html = "") {
+  return String(html)
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;|&#160;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function collectDetailContent(pageProduct) {
+  let descriptionHtml = "";
+  const descriptionUrl = pageProduct?.contents?.descriptionPageUrl?.replace(/^http:/, "https:");
+  if (descriptionUrl) {
+    const response = await fetch(descriptionUrl, { headers: { "User-Agent": "Mozilla/5.0 QueenitReviewMaker/4.0" } });
+    if (response.ok) descriptionHtml = await response.text();
+  }
+  const imageUrls = [...new Set([
+    pageProduct?.imageUrl,
+    pageProduct?.thumbnailUrl,
+    ...(pageProduct?.contents?.imageUrls || []),
+    ...[...descriptionHtml.matchAll(/(?:src|data-src)=["']([^"']+)["']/gi)].map((match) => match[1]),
+  ].filter((url) => /^https?:\/\//.test(url)))].slice(0, 8);
+  return { imageUrls, detailText: htmlToText(descriptionHtml).slice(0, 5000) };
+}
+
+async function analyzeReviewFacts(base, pageProduct) {
+  const detail = await collectDetailContent(pageProduct);
+  if (!openaiApiKey || (!detail.imageUrls.length && !detail.detailText)) {
+    return { reviewFacts: detail.detailText ? [detail.detailText.slice(0, 500)] : [], detailText: detail.detailText };
+  }
+  const content = [{
+    type: "input_text",
+    text: `상품명: ${base.productName}\n카테고리: ${base.category || "여성의류"}\n브랜드: ${base.brand || ""}\n상세페이지 텍스트: ${detail.detailText || "텍스트 없음"}\n상세 이미지에서 리뷰에 활용할 수 있는 사실만 추출하세요. 보이지 않는 소재나 기능은 추측하지 마세요.`,
+  }, ...detail.imageUrls.map((image_url) => ({ type: "input_image", image_url }))];
+  const result = await callOpenAI({
+    instructions: "여성의류 상세페이지 분석가입니다. 상품명과 상세 이미지·설명에서 직접 확인되는 소재감, 디자인, 핏 구조, 기장, 디테일, 코디 활용 특징을 짧은 한국어 사실 문장으로 정리하세요. 모델 체형이나 효능을 추측하지 마세요.",
+    input: [{ role: "user", content }],
+    schemaName: "queenit_review_facts",
+    schema: {
+      type: "object", additionalProperties: false,
+      properties: { reviewFacts: { type: "array", minItems: 2, maxItems: 8, items: { type: "string", minLength: 5, maxLength: 100 } } },
+      required: ["reviewFacts"],
+    },
+  });
+  return { reviewFacts: result.reviewFacts, detailText: detail.detailText };
+}
+
 function optionCode(sellerCode, color, size) {
   const normalizedSize = String(size || "FREE").toUpperCase();
   const colorCode = colorCodes[color] || String(color || "").replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpperCase() || "ET";
@@ -116,23 +167,14 @@ async function discoverProduct(productId) {
     return base;
   }
 
-  let descriptionHtml = "";
-  const descriptionUrl = product?.contents?.descriptionPageUrl?.replace(/^http:/, "https:");
-  if (descriptionUrl) {
-    const descriptionResponse = await fetch(descriptionUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
-    if (descriptionResponse.ok) descriptionHtml = await descriptionResponse.text();
-  }
-  const imageUrls = [...new Set([
-    ...(product?.contents?.imageUrls || []),
-    ...[...descriptionHtml.matchAll(/(?:src|data-src)=["']([^"']+)["']/gi)].map((m) => m[1]),
-  ].filter((url) => /^https?:\/\//.test(url)))].slice(0, 8);
+  const detail = await collectDetailContent(product);
 
   const content = [{
     type: "input_text",
-    text: `상품명: ${base.productName}\n카테고리: ${base.category}\n판매자 상품 코드: ${base.sellerCode}\n상세 이미지에서 실제 판매 컬러와 사이즈 조합만 추출하세요. 확실하지 않은 값은 추측하지 말고 confidence를 low로 표시하세요.`,
-  }, ...imageUrls.map((image_url) => ({ type: "input_image", image_url }))];
+    text: `상품명: ${base.productName}\n카테고리: ${base.category}\n판매자 상품 코드: ${base.sellerCode}\n상세페이지 텍스트: ${detail.detailText || "텍스트 없음"}\n상세 이미지에서 실제 판매 컬러와 사이즈 조합을 추출하고, 리뷰에 활용할 수 있는 확인된 상품 특징도 정리하세요. 확실하지 않은 값은 추측하지 말고 confidence를 low로 표시하세요.`,
+  }, ...detail.imageUrls.map((image_url) => ({ type: "input_image", image_url }))];
   const analysis = await callOpenAI({
-    instructions: "당신은 한국 여성의류 쇼핑몰 상품 옵션 검수자입니다. 이미지와 상품 정보를 근거로 컬러·사이즈 옵션 조합을 중복 없이 추출합니다.",
+    instructions: "당신은 한국 여성의류 쇼핑몰 상품 분석가입니다. 이미지와 상품 정보를 근거로 컬러·사이즈 옵션 조합을 중복 없이 추출하고, 소재감·디자인·핏 구조·기장·디테일·활용 특징 중 직접 확인되는 사실을 정리합니다.",
     input: [{ role: "user", content }],
     schemaName: "queenit_product_options",
     schema: {
@@ -140,8 +182,9 @@ async function discoverProduct(productId) {
       properties: {
         confidence: { type: "string", enum: ["high", "medium", "low"] },
         options: { type: "array", minItems: 1, maxItems: 30, items: { type: "object", additionalProperties: false, properties: { color: { type: "string" }, size: { type: "string" } }, required: ["color", "size"] } },
+        reviewFacts: { type: "array", minItems: 2, maxItems: 8, items: { type: "string", minLength: 5, maxLength: 100 } },
       },
-      required: ["confidence", "options"],
+      required: ["confidence", "options", "reviewFacts"],
     },
   });
   base.options = analysis.options.map(({ color, size }) => ({
@@ -151,19 +194,35 @@ async function discoverProduct(productId) {
     confidence: analysis.confidence,
   }));
   base.analysisNote = `상세 이미지 AI 분석 · 신뢰도 ${analysis.confidence}`;
+  base.reviewFacts = analysis.reviewFacts;
+  base.detailText = detail.detailText;
   return base;
 }
 
 async function resolveProduct(productId) {
   if (!products[productId]) return discoverProduct(productId);
   const base = products[productId];
-  if (base.imageUrl) return base;
   if (productPageCache.has(productId)) return { ...base, ...productPageCache.get(productId) };
   try {
     const response = await fetch(`https://web.queenit.kr/product/${encodeURIComponent(productId)}`, { headers: { "User-Agent": "Mozilla/5.0 QueenitReviewMaker/3.0" } });
     const html = response.ok ? await response.text() : "";
     const pageProduct = extractJsonObject(html, '"product":{"productId"');
-    const extra = { imageUrl: pageProduct?.imageUrl || pageProduct?.thumbnailUrl || "", category: pageProduct?.category?.title || "" };
+    if (!pageProduct?.productId) throw new Error("상세페이지 상품 정보를 찾지 못했습니다.");
+    const enrichedBase = {
+      ...base,
+      imageUrl: pageProduct.imageUrl || pageProduct.thumbnailUrl || base.imageUrl || "",
+      category: pageProduct.category?.title || base.category || "여성의류",
+      brand: pageProduct.brand || base.brand || "",
+    };
+    const detailAnalysis = await analyzeReviewFacts(enrichedBase, pageProduct);
+    const extra = {
+      imageUrl: enrichedBase.imageUrl,
+      category: enrichedBase.category,
+      brand: enrichedBase.brand,
+      reviewFacts: detailAnalysis.reviewFacts,
+      detailText: detailAnalysis.detailText,
+      analysisNote: "상세페이지 전체 AI 분석 완료",
+    };
     productPageCache.set(productId, extra);
     return { ...base, ...extra };
   } catch {
@@ -226,16 +285,55 @@ function makeReviews(product, optionLabel, count = 5, preferences = {}) {
     "가격을 생각하면 소재와 마무리도 무난한 편이에요.",
     "입었을 때 부해 보이지 않고 전체 모양이 자연스럽습니다.",
   ];
+  const reviewType = preferences.reviewType || "핏감";
+  const focusPhrases = {
+    "핏감": [
+      "입어보니 몸에 달라붙지 않으면서도 전체 핏이 단정하게 떨어져요.",
+      "어깨와 품이 어색하게 뜨지 않아 입었을 때 모양이 괜찮네요.",
+      "너무 크거나 조이지 않고 적당히 여유 있는 핏이라 마음에 들어요.",
+      "옆에서 봐도 부해 보이지 않고 선이 자연스럽게 잡힙니다.",
+      "기장과 품의 균형이 잘 맞아서 편안하면서도 흐트러져 보이지 않아요.",
+    ],
+    "컬러감": [
+      `${color} 색상이 화면보다 튀지 않고 얼굴빛을 편안하게 살려줘요.`,
+      `${color} 컬러가 칙칙하지 않아 평소 입던 옷과 잘 어울립니다.`,
+      "실제로 보니 색감이 과하지 않고 은은해서 손이 자주 갈 것 같아요.",
+      "밝은 곳과 실내에서 봐도 색이 부담스럽지 않고 차분하네요.",
+      "기본 하의에 받쳐 입기 쉬운 색이라 코디하기 편합니다.",
+    ],
+    "착용감": [
+      "입었을 때 피부에 거슬리는 느낌이 없고 움직이기도 편해요.",
+      "오래 앉아 있어도 조이는 곳이 없어 착용감이 편안합니다.",
+      "옷이 무겁지 않고 팔을 움직일 때도 불편하지 않네요.",
+      "몸에 닿는 촉감이 무난하고 답답하지 않아 일상복으로 좋아요.",
+      "입고 벗기 편하고 활동할 때 당기는 부분이 없어 만족스럽습니다.",
+    ],
+    "체형커버": [
+      "배와 옆선이 그대로 드러나지 않아 체형을 자연스럽게 가려줘요.",
+      "팔과 상체에 적당한 여유가 있어 신경 쓰이던 부분이 덜 보여요.",
+      "몸선을 꽉 잡지 않고 자연스럽게 떨어져 한결 날씬해 보입니다.",
+      "허리 부분이 달라붙지 않아 편하면서도 체형이 정돈돼 보여요.",
+      "뒤쪽까지 기장이 안정적이라 부담 없이 입기 좋습니다.",
+    ],
+    "가성비": [
+      "가격을 생각하면 소재와 전체 마무리가 무난해서 만족스러워요.",
+      "부담 없는 가격에 평소 자주 입을 수 있어 실용적입니다.",
+      "비슷한 옷과 비교해도 활용도가 높아 가격 대비 괜찮네요.",
+      "한철만 입을 느낌은 아니고 기본 옷으로 활용하기 좋아 보여요.",
+      "디자인과 착용감을 함께 보면 지불한 가격이 아깝지 않습니다.",
+    ],
+  };
 
   const reviews = [];
+  const detailFacts = Array.isArray(product.reviewFacts) ? product.reviewFacts.filter(Boolean) : [];
   const variantOffset = Math.max(0, (Number(preferences.variantIndex) || 1) - 1);
   const requestedLines = Math.min(5, Math.max(1, Number.parseInt(preferences.length, 10) || 2));
   const isChat = preferences.tone === "채팅";
-  const chatEndings = ["ㅎㅎ", "ㅋㅋㅋ", "~", "!!", "ㅎㅎㅎ"];
+  const chatEndings = ["ㅎㅎ", "ㅋㅋ", "ㅎㅎ^^", "^^", "ㅋㅋㅋ~"];
   for (let i = 0; i < count; i += 1) {
     const sentences = [
-      openings[(variantOffset + i) % openings.length],
-      colorPhrases[(variantOffset * 2 + i) % colorPhrases.length],
+      (focusPhrases[reviewType] || focusPhrases["핏감"])[(variantOffset + i) % 5],
+      detailFacts.length ? detailFacts[(variantOffset + i) % detailFacts.length] : openings[(variantOffset + i) % openings.length],
       fitByType[type][(variantOffset + i) % fitByType[type].length],
       materials[(variantOffset * 3 + i) % materials.length],
       usage[(variantOffset * 2 + i) % usage.length],
@@ -246,28 +344,50 @@ function makeReviews(product, optionLabel, count = 5, preferences = {}) {
   return reviews;
 }
 
+function reviewMatchesType(review, reviewType) {
+  const patterns = {
+    "핏감": /핏|품|어깨|기장|달라붙|떨어지|여유|크거나|조이|실루엣/,
+    "컬러감": /색|컬러|배색|색감|얼굴빛|밝|차분|은은|코디/,
+    "착용감": /착용|편안|편하|촉감|피부|움직|활동|답답|무겁|가볍|입고 벗/,
+    "체형커버": /체형|커버|가려|날씬|몸선|배와|뱃살|옆선|팔뚝|허리|뒤쪽|부해 보이지/,
+    "가성비": /가격|가성비|가격 대비|부담 없|실용|활용도|아깝지|마무리|값/,
+  };
+  return (patterns[reviewType] || /./).test(String(review || ""));
+}
+
 async function makeAiReviews(product, optionLabel, previousReviews = [], preferences = {}, count = 5) {
   if (!openaiApiKey) return { reviews: makeReviews(product, optionLabel, count, preferences), source: "template" };
   const recent = previousReviews.filter(Boolean).slice(-40);
   const tone = preferences.tone || "다정하게";
+  const reviewType = preferences.reviewType || "종합";
   const reviewLength = preferences.length || "2줄";
   const requestedLines = Math.min(5, Math.max(1, Number.parseInt(reviewLength, 10) || 2));
   const chatGuide = tone === "채팅"
-    ? "친한 사람과 인터넷 채팅하듯 편하게 쓰고, ㅎㅎㅎ·ㅋㅋㅋ·~·!! 같은 표현을 문맥에 맞게 자연스럽게 섞으세요. 모든 문장에 반복하거나 과하게 사용하지 마세요."
+    ? `친한 사람과 인터넷 채팅하듯 편하게 쓰세요. 리뷰 번호에 따라 끝표현을 다르게 사용하세요: 1번 ㅎㅎ, 2번 ㅋㅋ, 3번 ㅎㅎ^^, 4번 ^^, 5번 ㅋㅋㅋ~. 같은 표현만 반복하지 말고 문맥에 맞게 한 번 정도만 자연스럽게 사용하세요.`
     : "선택한 말투에 맞춰 자연스럽게 작성하세요.";
+  const sequentialDiversityGuide = [
+    "리뷰를 배열 순서대로 1번부터 작성하세요.",
+    "2번부터는 바로 앞 번호까지 이미 작성한 모든 리뷰를 먼저 비교한 뒤 작성하세요.",
+    "앞 리뷰와 첫 문장, 중심 소재, 장점, 문장 구조, 어미가 겹치면 다른 표현과 관점으로 다시 작성하세요.",
+    `현재 선택된 리뷰 종류인 '${reviewType}'가 리뷰 전체의 핵심 주제입니다. 첫 문장부터 이 종류에 관한 구체적인 경험을 쓰세요.`,
+    "선택되지 않은 다른 리뷰 종류를 중심 소재로 바꾸지 마세요.",
+    "다섯 리뷰에 같은 칭찬이나 결론을 단어만 바꿔 반복하지 마세요.",
+  ].join("\n");
   let result;
   try {
     result = await callOpenAI({
     instructions: [
+      `최우선 작성 기준: 리뷰 종류는 '${reviewType}'입니다. 결과의 첫 문장과 중심 내용은 반드시 이 기준을 직접 다뤄야 합니다.`,
       "당신은 40~50대 한국 여성 고객의 자연스러운 쇼핑 후기 작성자입니다.",
       "서로 다른 사람이 쓴 것처럼 말투, 문장 길이, 관심 포인트를 확실히 다르게 하세요.",
       "광고 문구나 지나친 칭찬을 피하고 일상적인 표현을 사용하세요.",
       "직접 확인할 수 없는 세탁 결과, 배송 속도, 내구성은 단정하지 마세요.",
       "이전에 생성한 리뷰와 문장 구조나 핵심 표현이 겹치지 않게 하세요.",
+      sequentialDiversityGuide,
       chatGuide,
       `각 리뷰는 반드시 정확히 ${requestedLines}줄로 작성하고, 줄 사이는 줄바꿈 문자로 구분하세요. 임의로 줄 수를 늘리거나 줄이지 마세요.`,
     ].join("\n"),
-    input: `상품명: ${product.productName}\n카테고리: ${product.category || productType(product.productName)}\n옵션: ${optionLabel}\n브랜드: ${product.brand || ""}\n작성자 성별: ${preferences.gender || "여성"}\n연령대: ${preferences.age || "41~45"}\n말투: ${tone}\n리뷰 번호: ${preferences.variantIndex || 1}/5\n리뷰 길이: 정확히 ${requestedLines}줄\n추가 명령: ${preferences.command || "없음"}\n\n이전에 생성한 리뷰(반복 금지):\n${recent.length ? recent.map((v, i) => `${i + 1}. ${v}`).join("\n") : "없음"}\n\n서로 다른 리뷰 ${count}개를 작성하세요. 이전 리뷰와 소재, 첫 문장, 핵심 장점을 반드시 다르게 하세요.`,
+    input: `상품명: ${product.productName}\n카테고리: ${product.category || productType(product.productName)}\n옵션: ${optionLabel}\n브랜드: ${product.brand || ""}\n상세페이지에서 확인된 특징:\n${Array.isArray(product.reviewFacts) && product.reviewFacts.length ? product.reviewFacts.map((fact) => `- ${fact}`).join("\n") : (product.detailText || "확인된 추가 특징 없음")}\n작성자 성별: ${preferences.gender || "여성"}\n연령대: ${preferences.age || "41~45"}\n말투: ${tone}\n리뷰 번호: ${preferences.variantIndex || 1}/5\n리뷰 종류: ${reviewType}\n리뷰 길이: 정확히 ${requestedLines}줄\n추가 명령: ${preferences.command || "없음"}\n\n앞 번호까지 생성된 리뷰(반복 금지):\n${recent.length ? recent.map((v, i) => `${i + 1}. ${v}`).join("\n") : "없음"}\n\n현재 번호의 리뷰를 작성하기 전에 앞 리뷰들의 내용을 비교하세요. 선택된 리뷰 종류를 중심으로 쓰고, 상세페이지에서 확인된 특징 중 관련 있는 사실을 자연스럽게 반영하세요. 앞 리뷰와 소재·첫 문장·핵심 장점·말투가 겹치면 새 관점으로 바꿔 작성하세요.`,
     schemaName: "queenit_reviews",
     schema: {
       type: "object", additionalProperties: false,
@@ -283,7 +403,20 @@ async function makeAiReviews(product, optionLabel, previousReviews = [], prefere
     }
     throw error;
   }
-  return { reviews: result.reviews, source: "openai" };
+  const typeSafeFallbacks = makeReviews(product, optionLabel, count, preferences);
+  let reviews = result.reviews.map((review, index) =>
+    reviewMatchesType(review, reviewType) ? review : typeSafeFallbacks[index]
+  );
+  if (tone === "채팅") {
+    const chatEndings = ["ㅎㅎ", "ㅋㅋ", "ㅎㅎ^^", "^^", "ㅋㅋㅋ~"];
+    const startIndex = Math.max(0, (Number(preferences.variantIndex) || 1) - 1);
+    reviews = reviews.map((review, index) => {
+      const ending = chatEndings[(startIndex + index) % chatEndings.length];
+      const cleaned = String(review).trimEnd().replace(/(?:ㅎㅎ+|ㅋㅋ+|\^\^|[~!])+\s*$/u, "").trimEnd();
+      return `${cleaned} ${ending}`;
+    });
+  }
+  return { reviews, source: "openai" };
 }
 
 function json(res, status, value) {

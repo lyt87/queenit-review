@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>퀸잇 리뷰 작성기</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="sheet-app">
+    <header class="app-header">
+      <div><span class="app-kicker">QUEENIT SELLER TOOL</span><h1>퀸잇 리뷰 작성기</h1></div>
+      <div class="connection"><span id="aiStatus">연결 확인 중</span><button id="openApiButton" type="button">GPT 설정</button></div>
+    </header>
+
+    <section class="input-panel">
+      <label for="productId">퀸잇 ID 입력</label>
+      <textarea id="productId" placeholder="예: 6c66da085c3cb098006cf23bff96bb7c&#10;여러 개 입력 시 쉼표 또는 줄바꿈으로 구분"></textarea>
+      <button id="loadButton" class="primary-button" type="button">상품 불러오기</button>
+    </section>
+
+    <section class="settings-panel" aria-label="리뷰 작성 설정">
+      <label><span>성별 구분자</span><select id="gender"><option>여성</option><option>남성</option></select></label>
+      <label><span>연령대 구분자</span><select id="age"><option>41~45</option><option>46~50</option><option>51~55</option><option>56~60</option></select></label>
+      <label><span>말투 구분자</span><select id="tone"><option>다정하게</option><option>편안하게</option><option>솔직하게</option><option>담백하게</option><option>채팅</option></select></label>
+      <label><span>리뷰 길이 구분자</span><select id="reviewLength"><option>1줄</option><option selected>2줄</option><option>3줄</option><option>4줄</option><option>5줄</option></select></label>
+      <label><span>리뷰 종류 구분자</span><select id="reviewType"><option selected>순차 적용</option><option>핏감</option><option>컬러감</option><option>착용감</option><option>체형커버</option><option>가성비</option></select></label>
+      <label class="command-field"><span>명령어 입력란</span><input id="command" placeholder="예: 세탁법은 말하지 말아줘" /></label>
+    </section>
+
+    <section id="apiPanel" class="api-panel hidden">
+      <input id="apiKey" type="password" autocomplete="off" placeholder="OpenAI API Key (sk-...)" aria-label="OpenAI API Key" />
+      <button id="connectApiButton" type="button">GPT 연결</button>
+      <small>키는 파일에 저장하지 않고 실행 중인 로컬 서버에만 전달됩니다.</small>
+    </section>
+
+    <section class="action-row">
+      <button id="refreshAllButton" type="button">리뷰 전체 새로고침</button>
+      <button id="downloadButton" type="button">엑셀 다운로드</button>
+      <span id="resultCount">상품을 불러오면 리뷰가 표시됩니다.</span>
+    </section>
+
+    <section class="table-wrap">
+      <table class="review-table">
+        <colgroup><col class="c-refresh"><col class="c-name"><col class="c-image"><col class="c-id"><col class="c-option"><col class="c-tone"><col class="c-length"><col class="c-type"><col class="c-review"><col class="c-one"></colgroup>
+        <thead><tr><th>상품 새로고침</th><th>상품명</th><th>사진 이미지</th><th>퀸잇 ID</th><th>옵션 코드</th><th>말투 구분자</th><th>리뷰 길이 구분자</th><th>리뷰 종류 구분자</th><th>리뷰</th><th>개별 새로고침</th></tr></thead>
+        <tbody id="reviewTableBody"><tr class="empty-row"><td colspan="10">퀸잇 ID를 입력하고 상품 불러오기를 눌러주세요.</td></tr></tbody>
+      </table>
+    </section>
+  </main>
+  <div id="toast" class="toast" role="status"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
