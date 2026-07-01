@@ -140,6 +140,14 @@ function normalizeImageUrl(value = "") {
   return /^https?:\/\//i.test(url) ? url : "";
 }
 
+function escapeHtmlAttribute(value = "") {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 async function collectDetailContent(pageProduct) {
   let descriptionHtml = "";
   const descriptionUrls = [
@@ -432,7 +440,7 @@ function makeReviews(product, optionLabel, count = 5, preferences = {}) {
   const reviews = [];
   const detailFacts = Array.isArray(product.reviewFacts) ? product.reviewFacts.filter(Boolean) : [];
   const variantOffset = Math.max(0, (Number(preferences.variantIndex) || 1) - 1);
-  const requestedLines = Math.min(5, Math.max(1, Number.parseInt(preferences.length, 10) || 2));
+  const requestedSentences = Math.min(5, Math.max(1, Number.parseInt(preferences.length, 10) || 2));
   const isChat = preferences.tone === "채팅";
   const chatEndings = ["ㅎㅎ", "ㅋㅋ", "ㅎㅎ^^", "^^", "ㅋㅋㅋ~"];
   for (let i = 0; i < count; i += 1) {
@@ -442,9 +450,9 @@ function makeReviews(product, optionLabel, count = 5, preferences = {}) {
       fitByType[type][(variantOffset + i) % fitByType[type].length],
       materials[(variantOffset * 3 + i) % materials.length],
       usage[(variantOffset * 2 + i) % usage.length],
-    ].slice(0, requestedLines);
+    ].slice(0, requestedSentences);
     if (isChat) sentences[sentences.length - 1] += chatEndings[i % chatEndings.length];
-    reviews.push(sentences.join("\n"));
+    reviews.push(sentences.join(" "));
   }
   return reviews;
 }
@@ -530,8 +538,8 @@ async function makeAiReviews(product, optionLabel, previousReviews = [], prefere
       : reviewType === "디테일"
         ? "상세페이지에서 확인되는 프린팅, 자수, 레터링, 로고, 엠블럼, 단추, 배색, 넥라인, 소매, 밑단과 마감 같은 디자인 디테일을 핵심으로 쓰세요. 실제로 보이지 않는 장식 방식은 추측하지 마세요."
         : `선택된 '${reviewType}' 항목을 리뷰의 핵심 주제로 삼으세요.`;
-  const reviewLength = preferences.length || "2줄";
-  const requestedLines = Math.min(5, Math.max(1, Number.parseInt(reviewLength, 10) || 2));
+  const reviewLength = preferences.length || "2문장";
+  const requestedSentences = Math.min(5, Math.max(1, Number.parseInt(reviewLength, 10) || 2));
   const chatGuide = tone === "채팅"
     ? `친한 사람과 인터넷 채팅하듯 편하게 쓰세요. 리뷰 번호에 따라 끝표현을 다르게 사용하세요: 1번 ㅎㅎ, 2번 ㅋㅋ, 3번 ㅎㅎ^^, 4번 ^^, 5번 ㅋㅋㅋ~. 같은 표현만 반복하지 말고 문맥에 맞게 한 번 정도만 자연스럽게 사용하세요.`
     : "선택한 말투에 맞춰 자연스럽게 작성하세요.";
@@ -559,9 +567,9 @@ async function makeAiReviews(product, optionLabel, previousReviews = [], prefere
       "같은 상품의 앞 리뷰와 첫 문장의 시작 단어나 도입 방식이 비슷하면 완전히 다른 상황이나 표현으로 시작하세요.",
       sequentialDiversityGuide,
       chatGuide,
-      `각 리뷰는 반드시 정확히 ${requestedLines}줄로 작성하고, 줄 사이는 줄바꿈 문자로 구분하세요. 임의로 줄 수를 늘리거나 줄이지 마세요.`,
+      `각 리뷰는 반드시 정확히 ${requestedSentences}개의 완전한 문장으로 작성하세요. 문장 수를 임의로 늘리거나 줄이지 말고, 불필요한 줄바꿈은 사용하지 마세요.`,
     ].join("\n"),
-    input: `상품명: ${product.productName}\n카테고리: ${product.category || productType(product.productName)}\n옵션: ${optionLabel}\n브랜드: ${product.brand || ""}\n상세페이지에서 확인된 특징:\n${Array.isArray(product.reviewFacts) && product.reviewFacts.length ? product.reviewFacts.map((fact) => `- ${fact}`).join("\n") : (product.detailText || "확인된 추가 특징 없음")}\n작성자 성별: ${preferences.gender || "여성"}\n연령대: ${preferences.age || "41~45"}\n말투: ${tone}\n리뷰 번호: ${preferences.variantIndex || 1}/5\n리뷰 종류: ${reviewType}\n리뷰 길이: 정확히 ${requestedLines}줄\n추가 명령: ${preferences.command || "없음"}\n\n앞 번호까지 생성된 리뷰(반복 금지):\n${recent.length ? recent.map((v, i) => `${i + 1}. ${v}`).join("\n") : "없음"}\n\n현재 번호의 리뷰를 작성하기 전에 앞 리뷰들의 내용을 비교하세요. 선택된 리뷰 종류를 중심으로 쓰고, 상세페이지에서 확인된 특징 중 관련 있는 사실을 자연스럽게 반영하세요. 앞 리뷰와 소재·첫 문장·핵심 장점·말투가 겹치면 새 관점으로 바꿔 작성하세요.`,
+    input: `상품명: ${product.productName}\n카테고리: ${product.category || productType(product.productName)}\n옵션: ${optionLabel}\n브랜드: ${product.brand || ""}\n상세페이지에서 확인된 특징:\n${Array.isArray(product.reviewFacts) && product.reviewFacts.length ? product.reviewFacts.map((fact) => `- ${fact}`).join("\n") : (product.detailText || "확인된 추가 특징 없음")}\n작성자 성별: ${preferences.gender || "여성"}\n연령대: ${preferences.age || "41~45"}\n말투: ${tone}\n리뷰 번호: ${preferences.variantIndex || 1}/5\n리뷰 종류: ${reviewType}\n리뷰 길이: 정확히 ${requestedSentences}문장\n추가 명령: ${preferences.command || "없음"}\n\n앞 번호까지 생성된 리뷰(반복 금지):\n${recent.length ? recent.map((v, i) => `${i + 1}. ${v}`).join("\n") : "없음"}\n\n현재 번호의 리뷰를 작성하기 전에 앞 리뷰들의 내용을 비교하세요. 선택된 리뷰 종류를 중심으로 쓰고, 상세페이지에서 확인된 특징 중 관련 있는 사실을 자연스럽게 반영하세요. 앞 리뷰와 소재·첫 문장·핵심 장점·말투가 겹치면 새 관점으로 바꿔 작성하세요.`,
     schemaName: "queenit_reviews",
     schema: {
       type: "object", additionalProperties: false,
@@ -619,20 +627,30 @@ async function createWorkbook(entries) {
   const sheet = workbook.getWorksheet("Sheet1") || workbook.worksheets[0];
   if (!sheet) throw new Error("엑셀 템플릿의 Sheet1 시트를 찾지 못했습니다.");
 
-  const rows = entries.flatMap((entry) => entry.reviews.map((review) => [
-    entry.productId,
-    entry.optionCode,
-    review,
-    entry.imageUrls[0] || null,
-    entry.imageUrls[1] || null,
-    entry.imageUrls[2] || null,
-    null, null, null, null, null,
-  ]));
+  const optionImageCounts = new Map();
+  const rows = [];
+  for (const entry of entries) {
+    for (const review of entry.reviews) {
+      const countKey = `${entry.productId}:${entry.optionCode}`;
+      const imageNumber = (optionImageCounts.get(countKey) || 0) + 1;
+      optionImageCounts.set(countKey, imageNumber);
+      const imageTag = entry.imageUrls[0]
+        ? `<img src="${escapeHtmlAttribute(entry.imageUrls[0])}" alt="${escapeHtmlAttribute(entry.optionCode)}_${imageNumber}.jpg" />`
+        : null;
+      rows.push([
+        entry.productId,
+        entry.optionCode,
+        review,
+        imageTag,
+        null, null, null, null, null, null, null,
+      ]);
+    }
+  }
   const thinBorder = { style: "thin", color: { argb: "FFB7B7B7" } };
   rows.forEach((values, index) => {
     const row = sheet.getRow(6 + index);
     row.values = values;
-    row.height = 82.5;
+    row.height = 135;
     for (let column = 1; column <= 11; column += 1) {
       const cell = row.getCell(column);
       cell.font = { name: "Arial", size: 9, color: { argb: "FF000000" } };

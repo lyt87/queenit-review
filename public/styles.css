@@ -46,7 +46,6 @@ h1 { margin:3px 0 0; font-size:24px; letter-spacing:-.04em; }
 .option-select { font-size:11px; }
 .review-text { width:100%; min-height:120px; padding:11px; resize:vertical; border:1px solid transparent; outline:none; line-height:1.7; background:#fbfcfd; }
 .review-text:focus { border-color:var(--blue); background:#fff; }
-.image-url-field { grid-column:span 2; }
 .review-index { display:inline-grid; width:24px; height:24px; place-items:center; margin-right:6px; color:#fff; background:#71819a; border-radius:50%; font-size:11px; }
 .inferred { display:block; margin-top:6px; color:#a06023; font-size:10px; }
 .empty-row td { height:150px; text-align:center; color:#7e8796; background:#fafbfc; }

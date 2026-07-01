@@ -4,6 +4,7 @@ const tbody = $("#reviewTableBody");
 const states = new Map();
 const toast = $("#toast");
 const REVIEW_TYPES = ["핏감", "컬러감", "착용감", "체형커버", "가성비", "종합적", "소재", "디테일"];
+const REVIEW_IMAGE_URL = "https://images002.sabangnet.co.kr/v1/AUTH_c55e59a8ec2149e7ad5e61ca73645bd9/mw167657/image/1782893977980.jpg";
 let aiStatusState = { aiConnected: false, model: null, rateLimitResetAt: null };
 
 function renderAiStatus() {
@@ -63,28 +64,6 @@ function ids() {
   return [...new Set($("#productId").value.split(/[\s,;]+/).map((value) => value.trim()).filter(Boolean))].slice(0, 20);
 }
 
-function extractImageUrl(value) {
-  const text = String(value || "").trim();
-  const srcMatch = text.match(/<img[^>]+src=["']([^"']+)["']/i);
-  return (srcMatch?.[1] || text).trim();
-}
-
-async function copyText(value) {
-  const text = String(value || "").trim();
-  if (!text) return notify("복사할 이미지 링크를 입력해 주세요.");
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    const helper = document.createElement("textarea");
-    helper.value = text;
-    document.body.appendChild(helper);
-    helper.select();
-    document.execCommand("copy");
-    helper.remove();
-  }
-  notify("이미지 링크를 복사했습니다.");
-}
-
 function preferences(toneOverride, lengthOverride, typeOverride) {
   return {
     gender: $("#gender").value,
@@ -136,7 +115,7 @@ function render() {
     const toneOptions = ["다정하게", "편안하게", "솔직하게", "담백하게", "채팅"].map((tone) =>
       `<option value="${tone}" ${tone === state.tones[index] ? "selected" : ""}>${tone}</option>`
     ).join("");
-    const lengthOptions = ["1줄", "2줄", "3줄", "4줄", "5줄"].map((length) =>
+    const lengthOptions = ["1문장", "2문장", "3문장", "4문장", "5문장"].map((length) =>
       `<option value="${length}" ${length === state.lengths[index] ? "selected" : ""}>${length}</option>`
     ).join("");
     const typeOptions = REVIEW_TYPES.map((type) =>
@@ -298,13 +277,11 @@ $("#refreshAllButton").addEventListener("click", async () => {
 });
 
 $("#downloadButton").addEventListener("click", async () => {
-  const reviewImageUrl = extractImageUrl($("#reviewImageUrl").value);
-  $("#reviewImageUrl").value = reviewImageUrl;
   const entries = [...states.values()].flatMap((state) => state.reviews.map((review, index) => ({
     productId: state.product.productId,
     optionCode: state.optionCodes[index],
     reviews: [review.trim()],
-    imageUrls: [reviewImageUrl].filter(Boolean),
+    imageUrls: [REVIEW_IMAGE_URL],
   })).filter((entry) => entry.reviews[0]));
   if (!entries.length) return notify("먼저 상품을 불러와 주세요.");
   const button = $("#downloadButton");
