@@ -13,6 +13,7 @@ const productPageCache = new Map();
 const port = Number(process.env.PORT || 4173);
 let openaiApiKey = process.env.OPENAI_API_KEY || "";
 const openaiModel = process.env.OPENAI_MODEL || "gpt-5.4-mini";
+const reviewImageBaseUrl = "https://ecimg.cafe24img.com/pg2689b05693693022/myleffin/review";
 let rateLimitResetAt = null;
 
 function rateLimitResetFromMessage(message = "") {
@@ -146,6 +147,30 @@ function escapeHtmlAttribute(value = "") {
     .replace(/"/g, "&quot;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+async function isReachableImage(url) {
+  if (!/^https?:\/\//i.test(String(url || ""))) return false;
+  const attempts = [
+    { method: "HEAD", headers: {} },
+    { method: "GET", headers: { Range: "bytes=0-1023" } },
+  ];
+  for (const attempt of attempts) {
+    try {
+      const response = await fetch(url, {
+        method: attempt.method,
+        headers: { "User-Agent": "Mozilla/5.0 QueenitReviewMaker/5.0", ...attempt.headers },
+        redirect: "follow",
+        signal: AbortSignal.timeout(8000),
+      });
+      const contentType = response.headers.get("content-type") || "";
+      if (response.body) await response.body.cancel().catch(() => {});
+      if (response.ok && /^image\//i.test(contentType)) return true;
+    } catch {
+      // GET 방식으로 한 번 더 확인합니다.
+    }
+  }
+  return false;
 }
 
 async function collectDetailContent(pageProduct) {
@@ -440,7 +465,7 @@ function makeReviews(product, optionLabel, count = 5, preferences = {}) {
   const reviews = [];
   const detailFacts = Array.isArray(product.reviewFacts) ? product.reviewFacts.filter(Boolean) : [];
   const variantOffset = Math.max(0, (Number(preferences.variantIndex) || 1) - 1);
-  const requestedSentences = Math.min(5, Math.max(1, Number.parseInt(preferences.length, 10) || 2));
+  const requestedSentences = Math.min(5, Math.max(1, Number.parseInt(preferences.length, 10) || 1));
   const isChat = preferences.tone === "채팅";
   const chatEndings = ["ㅎㅎ", "ㅋㅋ", "ㅎㅎ^^", "^^", "ㅋㅋㅋ~"];
   for (let i = 0; i < count; i += 1) {
@@ -538,8 +563,8 @@ async function makeAiReviews(product, optionLabel, previousReviews = [], prefere
       : reviewType === "디테일"
         ? "상세페이지에서 확인되는 프린팅, 자수, 레터링, 로고, 엠블럼, 단추, 배색, 넥라인, 소매, 밑단과 마감 같은 디자인 디테일을 핵심으로 쓰세요. 실제로 보이지 않는 장식 방식은 추측하지 마세요."
         : `선택된 '${reviewType}' 항목을 리뷰의 핵심 주제로 삼으세요.`;
-  const reviewLength = preferences.length || "2문장";
-  const requestedSentences = Math.min(5, Math.max(1, Number.parseInt(reviewLength, 10) || 2));
+  const reviewLength = preferences.length || "1문장";
+  const requestedSentences = Math.min(5, Math.max(1, Number.parseInt(reviewLength, 10) || 1));
   const chatGuide = tone === "채팅"
     ? `친한 사람과 인터넷 채팅하듯 편하게 쓰세요. 리뷰 번호에 따라 끝표현을 다르게 사용하세요: 1번 ㅎㅎ, 2번 ㅋㅋ, 3번 ㅎㅎ^^, 4번 ^^, 5번 ㅋㅋㅋ~. 같은 표현만 반복하지 말고 문맥에 맞게 한 번 정도만 자연스럽게 사용하세요.`
     : "선택한 말투에 맞춰 자연스럽게 작성하세요.";
@@ -628,24 +653,37 @@ async function createWorkbook(entries) {
   if (!sheet) throw new Error("엑셀 템플릿의 Sheet1 시트를 찾지 못했습니다.");
 
   const optionImageCounts = new Map();
-  const rows = [];
+  const preparedRows = [];
   for (const entry of entries) {
     for (const review of entry.reviews) {
       const countKey = `${entry.productId}:${entry.optionCode}`;
       const imageNumber = (optionImageCounts.get(countKey) || 0) + 1;
       optionImageCounts.set(countKey, imageNumber);
-      const imageTag = entry.imageUrls[0]
-        ? `<img src="${escapeHtmlAttribute(entry.imageUrls[0])}" alt="${escapeHtmlAttribute(entry.optionCode)}_${imageNumber}.jpg" />`
-        : null;
-      rows.push([
+      const imageFileName = `${entry.optionCode}_${imageNumber}.jpg`;
+      const imageSrc = `${reviewImageBaseUrl}/${imageFileName}`;
+      preparedRows.push({
+        imageSrc,
+        values: [
         entry.productId,
         entry.optionCode,
         review,
-        imageTag,
+        null,
         null, null, null, null, null, null, null,
-      ]);
+        ],
+        imageFileName,
+      });
     }
   }
+  const uniqueImageUrls = [...new Set(preparedRows.map((row) => row.imageSrc).filter(Boolean))];
+  const imageAvailability = new Map(await Promise.all(
+    uniqueImageUrls.map(async (url) => [url, await isReachableImage(url)]),
+  ));
+  const rows = preparedRows.map(({ imageSrc, imageFileName, values }) => {
+    if (imageAvailability.get(imageSrc)) {
+      values[3] = `<img src="${escapeHtmlAttribute(imageSrc)}" alt="${escapeHtmlAttribute(imageFileName)}" />`;
+    }
+    return values;
+  });
   const thinBorder = { style: "thin", color: { argb: "FFB7B7B7" } };
   rows.forEach((values, index) => {
     const row = sheet.getRow(6 + index);

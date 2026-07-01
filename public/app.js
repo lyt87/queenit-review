@@ -4,7 +4,9 @@ const tbody = $("#reviewTableBody");
 const states = new Map();
 const toast = $("#toast");
 const REVIEW_TYPES = ["핏감", "컬러감", "착용감", "체형커버", "가성비", "종합적", "소재", "디테일"];
-const REVIEW_IMAGE_URL = "https://images002.sabangnet.co.kr/v1/AUTH_c55e59a8ec2149e7ad5e61ca73645bd9/mw167657/image/1782893977980.jpg";
+const REVIEW_IMAGE_URL = "https://ecimg.cafe24img.com/pg2689b05693693022/myleffin/review/LA07TS021BLFF_1.jpg";
+const DEFAULT_REVIEW_LENGTH = "1문장";
+$("#reviewLength").value = DEFAULT_REVIEW_LENGTH;
 let aiStatusState = { aiConnected: false, model: null, rateLimitResetAt: null };
 
 function renderAiStatus() {
