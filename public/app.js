@@ -3,7 +3,7 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const tbody = $("#reviewTableBody");
 const states = new Map();
 const toast = $("#toast");
-const REVIEW_TYPES = ["핏감", "컬러감", "착용감", "체형커버", "가성비"];
+const REVIEW_TYPES = ["핏감", "컬러감", "착용감", "체형커버", "가성비", "종합적", "소재"];
 let aiStatusState = { aiConnected: false, model: null, rateLimitResetAt: null };
 
 function renderAiStatus() {
@@ -243,7 +243,7 @@ $("#loadButton").addEventListener("click", async () => {
         tones: Array(5).fill($("#tone").value),
         lengths: Array(5).fill($("#reviewLength").value),
         reviewTypes: $("#reviewType").value === "순차 적용"
-          ? [...REVIEW_TYPES]
+          ? REVIEW_TYPES.slice(0, 5)
           : Array(5).fill($("#reviewType").value),
         reviews: Array(5).fill("리뷰 작성 중..."),
         history: [],

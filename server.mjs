@@ -322,6 +322,20 @@ function makeReviews(product, optionLabel, count = 5, preferences = {}) {
       "한철만 입을 느낌은 아니고 기본 옷으로 활용하기 좋아 보여요.",
       "디자인과 착용감을 함께 보면 지불한 가격이 아깝지 않습니다.",
     ],
+    "종합적": [
+      "색감이 부담스럽지 않고 핏도 편안해서 가격까지 생각하면 전체적으로 만족스러워요.",
+      "입었을 때 체형을 자연스럽게 가려주고 컬러도 코디하기 쉬워 활용도가 괜찮네요.",
+      "착용감과 핏이 편한 데다 디자인도 무난해서 평소 입기 좋은 옷이에요.",
+      "색상, 사이즈감, 소재 느낌이 한쪽으로 치우치지 않아 전반적으로 만족합니다.",
+      "편하게 입으면서 체형도 보완되고 가격 부담도 크지 않아 균형이 잘 맞아요.",
+    ],
+    "소재": [
+      "소재가 뻣뻣하지 않고 피부에 닿는 느낌이 부드러워 편하게 입기 좋아요.",
+      "원단이 무겁지 않고 적당히 유연해서 움직일 때도 부담스럽지 않네요.",
+      "두께감이 지나치게 두껍지 않아 답답하지 않고 일상에서 입기 괜찮아요.",
+      "천이 힘없이 축 늘어지지 않으면서도 몸에 자연스럽게 따라와요.",
+      "소재의 촉감과 무게감이 무난해서 오래 입고 있어도 거슬리지 않습니다.",
+    ],
   };
 
   const reviews = [];
@@ -351,7 +365,18 @@ function reviewMatchesType(review, reviewType) {
     "착용감": /착용|편안|편하|촉감|피부|움직|활동|답답|무겁|가볍|입고 벗/,
     "체형커버": /체형|커버|가려|날씬|몸선|배와|뱃살|옆선|팔뚝|허리|뒤쪽|부해 보이지/,
     "가성비": /가격|가성비|가격 대비|부담 없|실용|활용도|아깝지|마무리|값/,
+    "소재": /소재|원단|천|촉감|두께|무게|가볍|부드|뻣뻣|신축|통기|유연|까슬/,
   };
+  if (reviewType === "종합적") {
+    const categoryPatterns = [
+      /핏|품|어깨|기장|실루엣/,
+      /색|컬러|배색|코디/,
+      /착용|편안|촉감|활동|답답/,
+      /체형|커버|가려|몸선|허리|부해/,
+      /가격|가성비|실용|활용도|부담/,
+    ];
+    return categoryPatterns.filter((pattern) => pattern.test(String(review || ""))).length >= 2;
+  }
   return (patterns[reviewType] || /./).test(String(review || ""));
 }
 
@@ -360,6 +385,11 @@ async function makeAiReviews(product, optionLabel, previousReviews = [], prefere
   const recent = previousReviews.filter(Boolean).slice(-40);
   const tone = preferences.tone || "다정하게";
   const reviewType = preferences.reviewType || "종합";
+  const reviewTypeGuide = reviewType === "종합적"
+    ? "핏감, 컬러감, 착용감, 체형커버, 가성비 중 최소 두 가지 이상을 한쪽에 치우치지 않게 연결하여 전체적인 균형을 평가하세요."
+    : reviewType === "소재"
+      ? "상세페이지에서 확인된 원단의 촉감, 두께감, 무게감, 유연함, 신축성 또는 통기성 같은 소재 특징을 핵심으로 쓰세요. 확인되지 않은 혼용률이나 소재 성분은 추측하지 마세요."
+      : `선택된 '${reviewType}' 항목을 리뷰의 핵심 주제로 삼으세요.`;
   const reviewLength = preferences.length || "2줄";
   const requestedLines = Math.min(5, Math.max(1, Number.parseInt(reviewLength, 10) || 2));
   const chatGuide = tone === "채팅"
@@ -378,6 +408,7 @@ async function makeAiReviews(product, optionLabel, previousReviews = [], prefere
     result = await callOpenAI({
     instructions: [
       `최우선 작성 기준: 리뷰 종류는 '${reviewType}'입니다. 결과의 첫 문장과 중심 내용은 반드시 이 기준을 직접 다뤄야 합니다.`,
+      reviewTypeGuide,
       "당신은 40~50대 한국 여성 고객의 자연스러운 쇼핑 후기 작성자입니다.",
       "서로 다른 사람이 쓴 것처럼 말투, 문장 길이, 관심 포인트를 확실히 다르게 하세요.",
       "광고 문구나 지나친 칭찬을 피하고 일상적인 표현을 사용하세요.",
@@ -528,7 +559,7 @@ const server = http.createServer(async (req, res) => {
     const ext = path.extname(filePath);
     const mime = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml" }[ext] || "application/octet-stream";
     const file = await fs.readFile(filePath);
-    res.writeHead(200, { "Content-Type": mime });
+    res.writeHead(200, { "Content-Type": mime, "Cache-Control": "no-store, max-age=0" });
     res.end(file);
   } catch (error) {
     if (error?.code === "ENOENT") return json(res, 404, { message: "페이지를 찾지 못했습니다." });
