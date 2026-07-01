@@ -554,7 +554,7 @@ function hasSimilarOpening(review, previousReviews) {
 async function makeAiReviews(product, optionLabel, previousReviews = [], preferences = {}, count = 5) {
   if (!openaiApiKey) return { reviews: makeReviews(product, optionLabel, count, preferences), source: "template" };
   const recent = previousReviews.filter(Boolean).slice(-40);
-  const tone = preferences.tone || "다정하게";
+  const tone = preferences.tone || "간결하게";
   const reviewType = preferences.reviewType || "종합";
   const reviewTypeGuide = reviewType === "종합적"
     ? "핏감, 컬러감, 착용감, 체형커버, 가성비 중 최소 두 가지 이상을 한쪽에 치우치지 않게 연결하여 전체적인 균형을 평가하세요."
@@ -567,7 +567,9 @@ async function makeAiReviews(product, optionLabel, previousReviews = [], prefere
   const requestedSentences = Math.min(5, Math.max(1, Number.parseInt(reviewLength, 10) || 1));
   const chatGuide = tone === "채팅"
     ? `친한 사람과 인터넷 채팅하듯 편하게 쓰세요. 리뷰 번호에 따라 끝표현을 다르게 사용하세요: 1번 ㅎㅎ, 2번 ㅋㅋ, 3번 ㅎㅎ^^, 4번 ^^, 5번 ㅋㅋㅋ~. 같은 표현만 반복하지 말고 문맥에 맞게 한 번 정도만 자연스럽게 사용하세요.`
-    : "선택한 말투에 맞춰 자연스럽게 작성하세요.";
+    : tone === "간결하게"
+      ? "핵심 특징만 짧고 명확하게 쓰세요. 장황한 도입, 자기소개, 조건을 따지는 표현은 빼고 각 문장을 15~35자 안팎으로 간결하게 작성하세요."
+      : "선택한 말투에 맞춰 자연스럽게 작성하세요.";
   const sequentialDiversityGuide = [
     "리뷰를 배열 순서대로 1번부터 작성하세요.",
     "2번부터는 바로 앞 번호까지 이미 작성한 모든 리뷰를 먼저 비교한 뒤 작성하세요.",
@@ -598,7 +600,7 @@ async function makeAiReviews(product, optionLabel, previousReviews = [], prefere
     schemaName: "queenit_reviews",
     schema: {
       type: "object", additionalProperties: false,
-      properties: { reviews: { type: "array", minItems: count, maxItems: count, items: { type: "string", minLength: 40, maxLength: 320 } } },
+      properties: { reviews: { type: "array", minItems: count, maxItems: count, items: { type: "string", minLength: 15, maxLength: 320 } } },
       required: ["reviews"],
     },
     });
@@ -678,9 +680,9 @@ async function createWorkbook(entries) {
   const imageAvailability = new Map(await Promise.all(
     uniqueImageUrls.map(async (url) => [url, await isReachableImage(url)]),
   ));
-  const rows = preparedRows.map(({ imageSrc, imageFileName, values }) => {
+  const rows = preparedRows.map(({ imageSrc, values }) => {
     if (imageAvailability.get(imageSrc)) {
-      values[3] = `<img src="${escapeHtmlAttribute(imageSrc)}" alt="${escapeHtmlAttribute(imageFileName)}" />`;
+      values[3] = imageSrc;
     }
     return values;
   });

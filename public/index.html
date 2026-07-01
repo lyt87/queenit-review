@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>퀸잇 리뷰 작성기</title>
-  <link rel="stylesheet" href="/styles.css?v=36" />
+  <link rel="stylesheet" href="/styles.css?v=37" />
 </head>
 <body>
   <main class="sheet-app">
@@ -22,7 +22,7 @@
     <section class="settings-panel" aria-label="리뷰 작성 설정">
       <label><span>성별 구분자</span><select id="gender"><option>여성</option><option>남성</option></select></label>
       <label><span>연령대 구분자</span><select id="age"><option>41~45</option><option>46~50</option><option>51~55</option><option>56~60</option></select></label>
-      <label><span>말투 구분자</span><select id="tone"><option>다정하게</option><option>편안하게</option><option>솔직하게</option><option>담백하게</option><option>채팅</option></select></label>
+      <label><span>말투 구분자</span><select id="tone"><option selected>간결하게</option><option>다정하게</option><option>편안하게</option><option>솔직하게</option><option>담백하게</option><option>채팅</option></select></label>
       <label><span>리뷰 길이 구분자</span><select id="reviewLength"><option selected>1문장</option><option>2문장</option><option>3문장</option><option>4문장</option><option>5문장</option></select></label>
       <label><span>리뷰 종류 구분자</span><select id="reviewType"><option selected>순차 적용</option><option>핏감</option><option>컬러감</option><option>착용감</option><option>체형커버</option><option>가성비</option><option>종합적</option><option>소재</option><option>디테일</option></select></label>
       <label class="command-field"><span>명령어 입력란</span><input id="command" placeholder="예: 세탁법은 말하지 말아줘" /></label>
@@ -49,6 +49,6 @@
     </section>
   </main>
   <div id="toast" class="toast" role="status"></div>
-  <script type="module" src="/app.js?v=36"></script>
+  <script type="module" src="/app.js?v=37"></script>
 </body>
 </html>

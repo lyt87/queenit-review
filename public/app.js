@@ -5,7 +5,9 @@ const states = new Map();
 const toast = $("#toast");
 const REVIEW_TYPES = ["핏감", "컬러감", "착용감", "체형커버", "가성비", "종합적", "소재", "디테일"];
 const REVIEW_IMAGE_URL = "https://ecimg.cafe24img.com/pg2689b05693693022/myleffin/review/LA07TS021BLFF_1.jpg";
+const DEFAULT_TONE = "간결하게";
 const DEFAULT_REVIEW_LENGTH = "1문장";
+$("#tone").value = DEFAULT_TONE;
 $("#reviewLength").value = DEFAULT_REVIEW_LENGTH;
 let aiStatusState = { aiConnected: false, model: null, rateLimitResetAt: null };
 
@@ -114,7 +116,7 @@ function render() {
     const options = product.options.map((option) =>
       `<option value="${esc(option.code)}" ${option.code === selectedCode ? "selected" : ""}>${esc(option.label)} · ${esc(option.code)}</option>`
     ).join("");
-    const toneOptions = ["다정하게", "편안하게", "솔직하게", "담백하게", "채팅"].map((tone) =>
+    const toneOptions = ["간결하게", "다정하게", "편안하게", "솔직하게", "담백하게", "채팅"].map((tone) =>
       `<option value="${tone}" ${tone === state.tones[index] ? "selected" : ""}>${tone}</option>`
     ).join("");
     const lengthOptions = ["1문장", "2문장", "3문장", "4문장", "5문장"].map((length) =>
