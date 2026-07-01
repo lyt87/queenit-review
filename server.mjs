@@ -434,31 +434,36 @@ async function readJson(req) {
 }
 
 async function createWorkbook(entries) {
-  const { FileBlob, SpreadsheetFile } = await import("@oai/artifact-tool");
-  const template = await FileBlob.load(path.join(root, "assets", "review-template.xlsx"));
-  const workbook = await SpreadsheetFile.importXlsx(template);
-  const sheet = workbook.worksheets.getItem("Sheet1");
-  const rows = entries.flatMap((entry) => entry.reviews.map((review) => [entry.productId, entry.optionCode, review, null, null, null, null, null, null, null, null]));
-  const endRow = 5 + rows.length;
-  sheet.getRange(`A6:K${endRow}`).values = rows;
-  sheet.getRange(`A6:K${endRow}`).format = {
-    fill: "#FFFFFF",
-    font: { typeface: "Arial", fontSize: 9, color: "#000000" },
-    borders: { preset: "all", style: "thin", color: "#B7B7B7" },
-    wrapText: true,
-    verticalAlignment: "top",
-  };
-  sheet.getRange(`A6:C${endRow}`).format.horizontalAlignment = "left";
-  sheet.getRange(`D6:K${endRow}`).format.horizontalAlignment = "center";
-  sheet.getRange(`A6:K${endRow}`).format.rowHeight = 110;
-  const blob = await SpreadsheetFile.exportXlsx(workbook);
-  const tempPath = path.join(os.tmpdir(), `queenit-reviews-${crypto.randomUUID()}.xlsx`);
-  try {
-    await blob.save(tempPath);
-    return await fs.readFile(tempPath);
-  } finally {
-    await fs.unlink(tempPath).catch(() => {});
-  }
+  const ExcelJSImport = await import("exceljs");
+  const ExcelJS = ExcelJSImport.default || ExcelJSImport;
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.readFile(path.join(root, "assets", "review-template.xlsx"));
+  const sheet = workbook.getWorksheet("Sheet1") || workbook.worksheets[0];
+  if (!sheet) throw new Error("엑셀 템플릿의 Sheet1 시트를 찾지 못했습니다.");
+
+  const rows = entries.flatMap((entry) => entry.reviews.map((review) => [
+    entry.productId, entry.optionCode, review, null, null, null, null, null, null, null, null,
+  ]));
+  const thinBorder = { style: "thin", color: { argb: "FFB7B7B7" } };
+  rows.forEach((values, index) => {
+    const row = sheet.getRow(6 + index);
+    row.values = values;
+    row.height = 82.5;
+    for (let column = 1; column <= 11; column += 1) {
+      const cell = row.getCell(column);
+      cell.font = { name: "Arial", size: 9, color: { argb: "FF000000" } };
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFFFFF" } };
+      cell.border = { top: thinBorder, left: thinBorder, bottom: thinBorder, right: thinBorder };
+      cell.alignment = {
+        horizontal: column <= 3 ? "left" : "center",
+        vertical: "top",
+        wrapText: true,
+      };
+    }
+    row.commit();
+  });
+  const output = await workbook.xlsx.writeBuffer();
+  return Buffer.from(output);
 }
 
 const server = http.createServer(async (req, res) => {
