@@ -133,6 +133,13 @@ function htmlToText(html = "") {
     .trim();
 }
 
+function normalizeImageUrl(value = "") {
+  const text = String(value).trim();
+  const srcMatch = text.match(/<img[^>]+src=["']([^"']+)["']/i);
+  const url = (srcMatch?.[1] || text).trim();
+  return /^https?:\/\//i.test(url) ? url : "";
+}
+
 async function collectDetailContent(pageProduct) {
   let descriptionHtml = "";
   const descriptionUrls = [
@@ -359,7 +366,7 @@ function makeReviews(product, optionLabel, count = 5, preferences = {}) {
     "소재가 무겁지 않고 피부에 닿는 느낌도 거슬리지 않아요.",
     "생각보다 가볍고 하루 종일 입어도 답답하지 않네요.",
     "천이 뻣뻣하지 않아 움직이기 편합니다.",
-    "가격을 생각하면 소재와 마무리도 무난한 편이에요.",
+    "소재와 마무리가 전반적으로 무난한 편이에요.",
     "입었을 때 부해 보이지 않고 전체 모양이 자연스럽습니다.",
   ];
   const reviewType = preferences.reviewType || "핏감";
@@ -393,7 +400,7 @@ function makeReviews(product, optionLabel, count = 5, preferences = {}) {
       "뒤쪽까지 기장이 안정적이라 부담 없이 입기 좋습니다.",
     ],
     "가성비": [
-      "가격을 생각하면 소재와 전체 마무리가 무난해서 만족스러워요.",
+      "소재와 전체 마무리가 기대한 수준이라 만족스러워요.",
       "부담 없는 가격에 평소 자주 입을 수 있어 실용적입니다.",
       "비슷한 옷과 비교해도 활용도가 높아 가격 대비 괜찮네요.",
       "한철만 입을 느낌은 아니고 기본 옷으로 활용하기 좋아 보여요.",
@@ -412,6 +419,13 @@ function makeReviews(product, optionLabel, count = 5, preferences = {}) {
       "두께감이 지나치게 두껍지 않아 답답하지 않고 일상에서 입기 괜찮아요.",
       "천이 힘없이 축 늘어지지 않으면서도 몸에 자연스럽게 따라와요.",
       "소재의 촉감과 무게감이 무난해서 오래 입고 있어도 거슬리지 않습니다.",
+    ],
+    "디테일": [
+      "앞쪽 프린팅이 과하게 튀지 않으면서 포인트가 되어 밋밋하지 않아요.",
+      "레터링 위치와 크기가 적당해서 부담 없이 포인트로 입기 좋네요.",
+      "자수 장식이 깔끔하게 들어가 있어 가까이서 봐도 단정한 느낌이에요.",
+      "넥라인과 소매, 밑단 마감이 디자인과 자연스럽게 어우러집니다.",
+      "배색과 장식 디테일이 옷의 분위기를 살려줘서 단독으로 입어도 괜찮아요.",
     ],
   };
 
@@ -443,6 +457,7 @@ function reviewMatchesType(review, reviewType) {
     "체형커버": /체형|커버|가려|날씬|몸선|배와|뱃살|옆선|팔뚝|허리|뒤쪽|부해 보이지/,
     "가성비": /가격|가성비|가격 대비|부담 없|실용|활용도|아깝지|마무리|값/,
     "소재": /소재|원단|천|촉감|두께|무게|가볍|부드|뻣뻣|신축|통기|유연|까슬/,
+    "디테일": /프린트|프린팅|자수|레터링|로고|엠블럼|단추|버튼|배색|넥라인|소매|밑단|마감|장식|포인트/,
   };
   if (reviewType === "종합적") {
     const categoryPatterns = [
@@ -457,6 +472,52 @@ function reviewMatchesType(review, reviewType) {
   return (patterns[reviewType] || /./).test(String(review || ""));
 }
 
+const forbiddenReviewPhrases = [
+  /목을 조이지 않아서/,
+  /기본형/,
+  /FREE라서/i,
+  /가성비 기준으로 보면/,
+  /가격\s*(을\s*)?생각하면/,
+  /46\s*[-~]\s*50대인 저도/,
+  /가성비로 보면/,
+  /체형커버가 되는 쪽으로 보면/,
+  /체형커버로 보니/,
+  /가성비를 따져보면/,
+  /목에 닿는 부분이 까슬하지 않아서/,
+  /소매가 손목까지 와서 팔 움직일 때 허전하지 않았고/,
+  /라운드넥 반팔 티셔츠 디자인이다/,
+  /핏감이 생각보다 여유 있어서/,
+  /44\s*[~～-]\s*55\s*사이즈/,
+  /허리선 아래로 떨어지는 짧은 길이라 답답하지 않고/,
+  /가성비를 먼저 따져보면/,
+  /보더\s*패턴/,
+  /둥글게 내려오는 밑단/,
+  /가성비를 먼저 보게 되(는데|는 옷인데)/,
+  /옵션인데도/,
+  /44\s*사이즈인 제게도/,
+];
+
+function hasForbiddenReviewPhrase(review) {
+  return forbiddenReviewPhrases.some((pattern) => pattern.test(String(review || "")));
+}
+
+function openingSignature(review) {
+  const firstSentence = String(review || "").split(/[.!?\n]/)[0];
+  return firstSentence.replace(/[^가-힣A-Za-z0-9]/g, "").slice(0, 10).toLowerCase();
+}
+
+function hasSimilarOpening(review, previousReviews) {
+  const signature = openingSignature(review);
+  if (signature.length < 6) return false;
+  return previousReviews.some((previous) => {
+    const previousSignature = openingSignature(previous);
+    return previousSignature.length >= 6 && (
+      signature.startsWith(previousSignature.slice(0, 7)) ||
+      previousSignature.startsWith(signature.slice(0, 7))
+    );
+  });
+}
+
 async function makeAiReviews(product, optionLabel, previousReviews = [], preferences = {}, count = 5) {
   if (!openaiApiKey) return { reviews: makeReviews(product, optionLabel, count, preferences), source: "template" };
   const recent = previousReviews.filter(Boolean).slice(-40);
@@ -466,7 +527,9 @@ async function makeAiReviews(product, optionLabel, previousReviews = [], prefere
     ? "핏감, 컬러감, 착용감, 체형커버, 가성비 중 최소 두 가지 이상을 한쪽에 치우치지 않게 연결하여 전체적인 균형을 평가하세요."
     : reviewType === "소재"
       ? "상세페이지에서 확인된 원단의 촉감, 두께감, 무게감, 유연함, 신축성 또는 통기성 같은 소재 특징을 핵심으로 쓰세요. 확인되지 않은 혼용률이나 소재 성분은 추측하지 마세요."
-      : `선택된 '${reviewType}' 항목을 리뷰의 핵심 주제로 삼으세요.`;
+      : reviewType === "디테일"
+        ? "상세페이지에서 확인되는 프린팅, 자수, 레터링, 로고, 엠블럼, 단추, 배색, 넥라인, 소매, 밑단과 마감 같은 디자인 디테일을 핵심으로 쓰세요. 실제로 보이지 않는 장식 방식은 추측하지 마세요."
+        : `선택된 '${reviewType}' 항목을 리뷰의 핵심 주제로 삼으세요.`;
   const reviewLength = preferences.length || "2줄";
   const requestedLines = Math.min(5, Math.max(1, Number.parseInt(reviewLength, 10) || 2));
   const chatGuide = tone === "채팅"
@@ -491,6 +554,9 @@ async function makeAiReviews(product, optionLabel, previousReviews = [], prefere
       "광고 문구나 지나친 칭찬을 피하고 일상적인 표현을 사용하세요.",
       "직접 확인할 수 없는 세탁 결과, 배송 속도, 내구성은 단정하지 마세요.",
       "이전에 생성한 리뷰와 문장 구조나 핵심 표현이 겹치지 않게 하세요.",
+      "상품정보 분석 문장을 그대로 복사하지 말고 실제 후기 말투로 바꾸세요.",
+      "다음 표현은 사용하지 마세요: 목을 조이지 않아서, 기본형, FREE라서, 가성비 기준으로 보면, 가격 생각하면, 가격을 생각하면, 46-50대인 저도, 가성비로 보면, 체형커버가 되는 쪽으로 보면, 체형커버로 보니, 가성비를 따져보면, 목에 닿는 부분이 까슬하지 않아서, 소매가 손목까지 와서 팔 움직일 때 허전하지 않았고, 라운드넥 반팔 티셔츠 디자인이다, 핏감이 생각보다 여유 있어서, 44~55 사이즈, 허리선 아래로 떨어지는 짧은 길이라 답답하지 않고, 가성비를 먼저 따져보면, 보더패턴, 둥글게 내려오는 밑단, 가성비를 먼저 보게 되는데, 가성비를 먼저 보게 되는 옷인데, 옵션인데도, 44사이즈인 제게도.",
+      "같은 상품의 앞 리뷰와 첫 문장의 시작 단어나 도입 방식이 비슷하면 완전히 다른 상황이나 표현으로 시작하세요.",
       sequentialDiversityGuide,
       chatGuide,
       `각 리뷰는 반드시 정확히 ${requestedLines}줄로 작성하고, 줄 사이는 줄바꿈 문자로 구분하세요. 임의로 줄 수를 늘리거나 줄이지 마세요.`,
@@ -512,9 +578,13 @@ async function makeAiReviews(product, optionLabel, previousReviews = [], prefere
     throw error;
   }
   const typeSafeFallbacks = makeReviews(product, optionLabel, count, preferences);
-  let reviews = result.reviews.map((review, index) =>
-    reviewMatchesType(review, reviewType) ? review : typeSafeFallbacks[index]
-  );
+  let reviews = result.reviews.map((review, index) => {
+    const earlierReviews = [...recent, ...result.reviews.slice(0, index)];
+    const valid = reviewMatchesType(review, reviewType)
+      && !hasForbiddenReviewPhrase(review)
+      && !hasSimilarOpening(review, earlierReviews);
+    return valid ? review : typeSafeFallbacks[index];
+  });
   if (tone === "채팅") {
     const chatEndings = ["ㅎㅎ", "ㅋㅋ", "ㅎㅎ^^", "^^", "ㅋㅋㅋ~"];
     const startIndex = Math.max(0, (Number(preferences.variantIndex) || 1) - 1);
@@ -550,7 +620,13 @@ async function createWorkbook(entries) {
   if (!sheet) throw new Error("엑셀 템플릿의 Sheet1 시트를 찾지 못했습니다.");
 
   const rows = entries.flatMap((entry) => entry.reviews.map((review) => [
-    entry.productId, entry.optionCode, review, null, null, null, null, null, null, null, null,
+    entry.productId,
+    entry.optionCode,
+    review,
+    entry.imageUrls[0] || null,
+    entry.imageUrls[1] || null,
+    entry.imageUrls[2] || null,
+    null, null, null, null, null,
   ]));
   const thinBorder = { style: "thin", color: { argb: "FFB7B7B7" } };
   rows.forEach((values, index) => {
@@ -618,6 +694,7 @@ const server = http.createServer(async (req, res) => {
         productId: String(entry.productId || "").trim(),
         optionCode: String(entry.optionCode || "").trim(),
         reviews: Array.isArray(entry.reviews) ? entry.reviews.map((v) => String(v).trim()).filter(Boolean) : [],
+        imageUrls: Array.isArray(entry.imageUrls) ? entry.imageUrls.map(normalizeImageUrl).filter(Boolean).slice(0, 3) : [],
       })).filter((entry) => entry.productId && entry.optionCode && entry.reviews.length) : [];
       if (!entries.length) return json(res, 400, { message: "상품, 옵션, 리뷰를 확인해 주세요." });
       const buffer = await createWorkbook(entries);

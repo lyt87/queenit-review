@@ -3,7 +3,7 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const tbody = $("#reviewTableBody");
 const states = new Map();
 const toast = $("#toast");
-const REVIEW_TYPES = ["핏감", "컬러감", "착용감", "체형커버", "가성비", "종합적", "소재"];
+const REVIEW_TYPES = ["핏감", "컬러감", "착용감", "체형커버", "가성비", "종합적", "소재", "디테일"];
 let aiStatusState = { aiConnected: false, model: null, rateLimitResetAt: null };
 
 function renderAiStatus() {
@@ -63,6 +63,28 @@ function ids() {
   return [...new Set($("#productId").value.split(/[\s,;]+/).map((value) => value.trim()).filter(Boolean))].slice(0, 20);
 }
 
+function extractImageUrl(value) {
+  const text = String(value || "").trim();
+  const srcMatch = text.match(/<img[^>]+src=["']([^"']+)["']/i);
+  return (srcMatch?.[1] || text).trim();
+}
+
+async function copyText(value) {
+  const text = String(value || "").trim();
+  if (!text) return notify("복사할 이미지 링크를 입력해 주세요.");
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const helper = document.createElement("textarea");
+    helper.value = text;
+    document.body.appendChild(helper);
+    helper.select();
+    document.execCommand("copy");
+    helper.remove();
+  }
+  notify("이미지 링크를 복사했습니다.");
+}
+
 function preferences(toneOverride, lengthOverride, typeOverride) {
   return {
     gender: $("#gender").value,
@@ -84,16 +106,15 @@ function distributeOptions(options) {
     const color = colorName(option.label) || option.code;
     if (!colors.some((item) => item.color === color)) colors.push({ color, option });
   }
-  const representative = colors[0]?.option || options[0];
-  const others = colors.slice(1).map((item) => item.option);
-  if (!representative) return [];
-  if (!others.length) return Array(5).fill(representative.code);
-  if (others.length === 1) return [representative.code, representative.code, representative.code, others[0].code, others[0].code];
-  return [representative.code, representative.code, representative.code, others[0].code, others[1].code];
+  const colorOptions = colors.map((item) => item.option);
+  if (!colorOptions.length) return [];
+  return Array.from({ length: 5 }, (_, index) => colorOptions[index % colorOptions.length].code);
 }
 
 function allReviews(state) {
-  return state.reviews.map((value) => value.trim()).filter(Boolean);
+  return state.reviews
+    .map((value) => value.trim())
+    .filter((value) => value && value !== "리뷰 작성 중...");
 }
 
 function render() {
@@ -188,11 +209,11 @@ async function generateOne(state, index) {
 
 async function generateAll(state) {
   // API 요청을 동시에 몰아 보내면 일시적인 처리 제한이 생길 수 있어 순서대로 생성합니다.
-  const results = [];
   for (let index = 0; index < 5; index += 1) {
-    results.push(await generateOne(state, index));
+    const result = await generateOne(state, index);
+    state.reviews[index] = result.reviews[0];
   }
-  return results.map((result) => result.reviews[0]);
+  return [...state.reviews];
 }
 
 async function refreshProduct(id, button) {
@@ -277,10 +298,13 @@ $("#refreshAllButton").addEventListener("click", async () => {
 });
 
 $("#downloadButton").addEventListener("click", async () => {
+  const reviewImageUrl = extractImageUrl($("#reviewImageUrl").value);
+  $("#reviewImageUrl").value = reviewImageUrl;
   const entries = [...states.values()].flatMap((state) => state.reviews.map((review, index) => ({
     productId: state.product.productId,
     optionCode: state.optionCodes[index],
     reviews: [review.trim()],
+    imageUrls: [reviewImageUrl].filter(Boolean),
   })).filter((entry) => entry.reviews[0]));
   if (!entries.length) return notify("먼저 상품을 불러와 주세요.");
   const button = $("#downloadButton");
