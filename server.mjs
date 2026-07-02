@@ -10,9 +10,10 @@ const publicDir = path.join(root, "public");
 const productsPayload = JSON.parse(await fs.readFile(path.join(root, "data", "options.json"), "utf8"));
 const products = productsPayload.products;
 const productPageCache = new Map();
+const allowedProductImages = new Set();
 const port = Number(process.env.PORT || 4173);
 let openaiApiKey = process.env.OPENAI_API_KEY || "";
-const openaiModel = process.env.OPENAI_MODEL || "gpt-5.4-mini";
+const openaiModel = process.env.OPENAI_MODEL || "gpt-5.5";
 const reviewImageBaseUrl = "https://ecimg.cafe24img.com/pg2689b05693693022/myleffin/review";
 let rateLimitResetAt = null;
 
@@ -361,6 +362,20 @@ function productType(name) {
 }
 
 function makeReviews(product, optionLabel, count = 5, preferences = {}) {
+  const facts = Array.isArray(product.reviewFacts) ? product.reviewFacts.map((fact) => String(fact).trim()).filter(Boolean) : [];
+  const detailTextFacts = [String(product.detailText || "").trim()].filter(Boolean);
+  const verifiedFacts = facts.length ? facts : (detailTextFacts.length ? detailTextFacts : [`상품명은 ${product.productName}`, `선택 옵션은 ${optionLabel}`]);
+  {
+    const requestedSentences = Math.min(5, Math.max(1, Number.parseInt(preferences.length, 10) || 1));
+    const starts = ["실제로 보니", "눈에 먼저 들어온 건", "입었을 때는", "전체적으로", "디테일을 보면"];
+    return Array.from({ length: count }, (_, index) => {
+      const selected = Array.from({ length: requestedSentences }, (__, sentenceIndex) => {
+        const fact = verifiedFacts[(index * requestedSentences + sentenceIndex) % verifiedFacts.length].replace(/[.!?]+$/u, "");
+        return `${sentenceIndex === 0 ? `${starts[index % starts.length]} ` : ""}${fact}.`;
+      });
+      return selected.join(" ");
+    });
+  }
   const [color = "", size = ""] = optionLabel.split(",");
   const type = productType(product.productName);
   const colorPhrases = [
@@ -555,14 +570,6 @@ async function makeAiReviews(product, optionLabel, previousReviews = [], prefere
   if (!openaiApiKey) return { reviews: makeReviews(product, optionLabel, count, preferences), source: "template" };
   const recent = previousReviews.filter(Boolean).slice(-40);
   const tone = preferences.tone || "간결하게";
-  const reviewType = preferences.reviewType || "종합";
-  const reviewTypeGuide = reviewType === "종합적"
-    ? "핏감, 컬러감, 착용감, 체형커버, 가성비 중 최소 두 가지 이상을 한쪽에 치우치지 않게 연결하여 전체적인 균형을 평가하세요."
-    : reviewType === "소재"
-      ? "상세페이지에서 확인된 원단의 촉감, 두께감, 무게감, 유연함, 신축성 또는 통기성 같은 소재 특징을 핵심으로 쓰세요. 확인되지 않은 혼용률이나 소재 성분은 추측하지 마세요."
-      : reviewType === "디테일"
-        ? "상세페이지에서 확인되는 프린팅, 자수, 레터링, 로고, 엠블럼, 단추, 배색, 넥라인, 소매, 밑단과 마감 같은 디자인 디테일을 핵심으로 쓰세요. 실제로 보이지 않는 장식 방식은 추측하지 마세요."
-        : `선택된 '${reviewType}' 항목을 리뷰의 핵심 주제로 삼으세요.`;
   const reviewLength = preferences.length || "1문장";
   const requestedSentences = Math.min(5, Math.max(1, Number.parseInt(reviewLength, 10) || 1));
   const chatGuide = tone === "채팅"
@@ -573,17 +580,17 @@ async function makeAiReviews(product, optionLabel, previousReviews = [], prefere
   const sequentialDiversityGuide = [
     "리뷰를 배열 순서대로 1번부터 작성하세요.",
     "2번부터는 바로 앞 번호까지 이미 작성한 모든 리뷰를 먼저 비교한 뒤 작성하세요.",
-    "앞 리뷰와 첫 문장, 중심 소재, 장점, 문장 구조, 어미가 겹치면 다른 표현과 관점으로 다시 작성하세요.",
-    `현재 선택된 리뷰 종류인 '${reviewType}'가 리뷰 전체의 핵심 주제입니다. 첫 문장부터 이 종류에 관한 구체적인 경험을 쓰세요.`,
-    "선택되지 않은 다른 리뷰 종류를 중심 소재로 바꾸지 마세요.",
-    "다섯 리뷰에 같은 칭찬이나 결론을 단어만 바꿔 반복하지 마세요.",
+    "앞 리뷰와 첫 문장, 중심 소재, 상품 특징, 장점, 문장 구조, 어미가 겹치면 다른 사실과 관점으로 다시 작성하세요.",
+    "다섯 리뷰는 각각 상세페이지의 서로 다른 특징을 중심으로 작성하세요.",
+    "같은 칭찬이나 결론을 단어만 바꿔 반복하지 마세요. 앞 리뷰를 요약하거나 재진술하는 것도 금지합니다.",
   ].join("\n");
   let result;
   try {
     result = await callOpenAI({
     instructions: [
-      `최우선 작성 기준: 리뷰 종류는 '${reviewType}'입니다. 결과의 첫 문장과 중심 내용은 반드시 이 기준을 직접 다뤄야 합니다.`,
-      reviewTypeGuide,
+      "최우선 기준: 아래에 제공된 '상세페이지에서 확인된 특징', 상품명, 옵션, 브랜드에 명시된 사실만 사용하세요.",
+      "상세페이지에 없는 착용 경험, 촉감, 핏, 체형 보완, 품질, 가격 평가, 세탁, 배송, 내구성은 절대 만들거나 추측하지 마세요.",
+      "확인된 특징이 부족하면 새로운 사실을 보태지 말고, 확인된 사실의 표현과 관점만 자연스럽게 바꾸세요.",
       "당신은 40~50대 한국 여성 고객의 자연스러운 쇼핑 후기 작성자입니다.",
       "서로 다른 사람이 쓴 것처럼 말투, 문장 길이, 관심 포인트를 확실히 다르게 하세요.",
       "광고 문구나 지나친 칭찬을 피하고 일상적인 표현을 사용하세요.",
@@ -596,7 +603,7 @@ async function makeAiReviews(product, optionLabel, previousReviews = [], prefere
       chatGuide,
       `각 리뷰는 반드시 정확히 ${requestedSentences}개의 완전한 문장으로 작성하세요. 문장 수를 임의로 늘리거나 줄이지 말고, 불필요한 줄바꿈은 사용하지 마세요.`,
     ].join("\n"),
-    input: `상품명: ${product.productName}\n카테고리: ${product.category || productType(product.productName)}\n옵션: ${optionLabel}\n브랜드: ${product.brand || ""}\n상세페이지에서 확인된 특징:\n${Array.isArray(product.reviewFacts) && product.reviewFacts.length ? product.reviewFacts.map((fact) => `- ${fact}`).join("\n") : (product.detailText || "확인된 추가 특징 없음")}\n작성자 성별: ${preferences.gender || "여성"}\n연령대: ${preferences.age || "41~45"}\n말투: ${tone}\n리뷰 번호: ${preferences.variantIndex || 1}/5\n리뷰 종류: ${reviewType}\n리뷰 길이: 정확히 ${requestedSentences}문장\n추가 명령: ${preferences.command || "없음"}\n\n앞 번호까지 생성된 리뷰(반복 금지):\n${recent.length ? recent.map((v, i) => `${i + 1}. ${v}`).join("\n") : "없음"}\n\n현재 번호의 리뷰를 작성하기 전에 앞 리뷰들의 내용을 비교하세요. 선택된 리뷰 종류를 중심으로 쓰고, 상세페이지에서 확인된 특징 중 관련 있는 사실을 자연스럽게 반영하세요. 앞 리뷰와 소재·첫 문장·핵심 장점·말투가 겹치면 새 관점으로 바꿔 작성하세요.`,
+    input: `상품명: ${product.productName}\n카테고리: ${product.category || productType(product.productName)}\n옵션: ${optionLabel}\n브랜드: ${product.brand || ""}\n상세페이지에서 확인된 특징:\n${Array.isArray(product.reviewFacts) && product.reviewFacts.length ? product.reviewFacts.map((fact) => `- ${fact}`).join("\n") : (product.detailText || "확인된 추가 특징 없음")}\n작성자 성별: ${preferences.gender || "여성"}\n연령대: ${preferences.age || "41~45"}\n말투: ${tone}\n리뷰 번호: ${preferences.variantIndex || 1}/5\n리뷰 길이: 정확히 ${requestedSentences}문장\n추가 명령: ${preferences.command || "없음"}\n\n앞 번호까지 생성된 리뷰(내용과 표현 반복 금지):\n${recent.length ? recent.map((v, i) => `${i + 1}. ${v}`).join("\n") : "없음"}\n\n현재 번호의 리뷰를 작성하기 전에 앞 리뷰를 모두 비교하세요. 상세페이지에서 확인된 사실만 사용하되, 앞 리뷰와 중심 특징·첫 문장·표현·결론이 모두 다르게 작성하세요.`,
     schemaName: "queenit_reviews",
     schema: {
       type: "object", additionalProperties: false,
@@ -615,8 +622,7 @@ async function makeAiReviews(product, optionLabel, previousReviews = [], prefere
   const typeSafeFallbacks = makeReviews(product, optionLabel, count, preferences);
   let reviews = result.reviews.map((review, index) => {
     const earlierReviews = [...recent, ...result.reviews.slice(0, index)];
-    const valid = reviewMatchesType(review, reviewType)
-      && !hasForbiddenReviewPhrase(review)
+    const valid = !hasForbiddenReviewPhrase(review)
       && !hasSimilarOpening(review, earlierReviews);
     return valid ? review : typeSafeFallbacks[index];
   });
@@ -637,11 +643,11 @@ function json(res, status, value) {
   res.end(JSON.stringify(value));
 }
 
-async function readJson(req) {
+async function readJson(req, maxLength = 1_000_000) {
   let raw = "";
   for await (const chunk of req) {
     raw += chunk;
-    if (raw.length > 1_000_000) throw new Error("요청이 너무 큽니다.");
+    if (raw.length > maxLength) throw new Error("요청이 너무 큽니다.");
   }
   return raw ? JSON.parse(raw) : {};
 }
@@ -715,6 +721,16 @@ const server = http.createServer(async (req, res) => {
       if (rateLimitResetAt && rateLimitResetAt <= Date.now()) rateLimitResetAt = null;
       return json(res, 200, { aiConnected: Boolean(openaiApiKey), model: openaiApiKey ? openaiModel : null, rateLimitResetAt });
     }
+    if (req.method === "GET" && url.pathname === "/api/image-proxy") {
+      const source = String(url.searchParams.get("url") || "");
+      if (!allowedProductImages.has(source)) return json(res, 403, { message: "허용되지 않은 상품 이미지입니다." });
+      const response = await fetch(source, { headers: { "User-Agent": "Mozilla/5.0 QueenitReviewMaker/3.0" } });
+      const contentType = response.headers.get("content-type") || "";
+      if (!response.ok || !contentType.startsWith("image/")) return json(res, 404, { message: "상품 이미지를 불러오지 못했습니다." });
+      const buffer = Buffer.from(await response.arrayBuffer());
+      res.writeHead(200, { "Content-Type": contentType, "Content-Length": buffer.length, "Cache-Control": "public, max-age=3600" });
+      return res.end(buffer);
+    }
     if (req.method === "POST" && url.pathname === "/api/config") {
       const body = await readJson(req);
       const apiKey = String(body.apiKey || "").trim();
@@ -725,6 +741,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/api/product") {
       const id = (url.searchParams.get("id") || "").trim();
       const product = await resolveProduct(id);
+      if (product.imageUrl) allowedProductImages.add(product.imageUrl);
       return json(res, 200, product);
     }
     if (req.method === "POST" && url.pathname === "/api/products") {
@@ -733,7 +750,11 @@ const server = http.createServer(async (req, res) => {
       if (!ids.length) return json(res, 400, { message: "상품 ID를 한 개 이상 입력해 주세요." });
       const results = [];
       for (const id of ids) {
-        try { results.push({ ok: true, product: await resolveProduct(id) }); }
+        try {
+          const product = await resolveProduct(id);
+          if (product.imageUrl) allowedProductImages.add(product.imageUrl);
+          results.push({ ok: true, product });
+        }
         catch (error) { results.push({ ok: false, productId: id, message: error.message }); }
       }
       return json(res, 200, { results });
@@ -741,6 +762,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/api/generate") {
       const body = await readJson(req);
       const product = await resolveProduct(String(body.productId || "").trim());
+      if (product.imageUrl) allowedProductImages.add(product.imageUrl);
       const option = product.options.find((item) => item.code === body.optionCode) || product.options[0];
       const count = Math.max(1, Math.min(5, Number(body.count) || 5));
       const generated = await makeAiReviews(product, option.label, Array.isArray(body.previousReviews) ? body.previousReviews : [], body.preferences || {}, count);
@@ -759,6 +781,26 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, {
         "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "Content-Disposition": 'attachment; filename="queenit_seller_reviews.xlsx"',
+        "Content-Length": buffer.length,
+      });
+      return res.end(buffer);
+    }
+    if (req.method === "POST" && url.pathname === "/api/images/zip") {
+      const body = await readJson(req, 80_000_000);
+      const files = Array.isArray(body.files) ? body.files.slice(0, 100) : [];
+      if (!files.length) return json(res, 400, { message: "다운로드할 매칭 이미지가 없습니다." });
+      const AdmZipImport = await import("adm-zip");
+      const AdmZip = AdmZipImport.default || AdmZipImport;
+      const zip = new AdmZip();
+      for (const file of files) {
+        const name = String(file.name || "").replace(/[^A-Za-z0-9_.-]/g, "");
+        const match = String(file.dataUrl || "").match(/^data:image\/(?:jpeg|png|webp);base64,(.+)$/i);
+        if (name && match) zip.addFile(name, Buffer.from(match[1], "base64"));
+      }
+      const buffer = zip.toBuffer();
+      res.writeHead(200, {
+        "Content-Type": "application/zip",
+        "Content-Disposition": 'attachment; filename="queenit_matched_images.zip"',
         "Content-Length": buffer.length,
       });
       return res.end(buffer);

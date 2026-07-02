@@ -7,6 +7,7 @@
     "start": "node server.mjs"
   },
   "dependencies": {
+    "adm-zip": "^0.5.16",
     "exceljs": "^4.4.0"
   },
   "engines": {
