@@ -143,6 +143,15 @@ function normalizeImageUrl(value = "") {
   return /^https?:\/\//i.test(url) ? url : "";
 }
 
+function cleanReviewFacts(facts, productName = "상품") {
+  const cleaned = (Array.isArray(facts) ? facts : [])
+    .map((fact) => String(fact || "").replace(/[【】{}\[\]]/g, "").replace(/\s+/g, " ").trim())
+    .filter((fact) => fact.length >= 5 && fact.length <= 180)
+    .filter((fact) => (fact.match(/,/g) || []).length <= 4)
+    .filter((fact) => !/(MD추천|주문폭주|40대여성의류|50대여성의류|중년여성|미시룩|엄마옷)/i.test(fact));
+  return cleaned.length ? [...new Set(cleaned)].slice(0, 10) : [`${productName}에 표현된 디자인 디테일`];
+}
+
 function escapeHtmlAttribute(value = "") {
   return String(value)
     .replace(/&/g, "&amp;")
@@ -204,14 +213,14 @@ async function collectDetailContent(pageProduct) {
     ...Object.values(pageProduct?.multiResolutionImage || {}),
     ...Object.values(pageProduct?.multiResolutionThumbnail || {}),
     ...Object.values(pageProduct?.multiResolutionThumbnailUrls || {}).flat(),
-  ].filter((url) => /^https?:\/\//.test(url)))].slice(0, 24);
+  ].filter((url) => /^https?:\/\//.test(url) && /\.(?:jpe?g|png|webp)(?:[?#]|$)/i.test(url)))].slice(0, 24);
   return { imageUrls, detailText: htmlToText(descriptionHtml).slice(0, 5000) };
 }
 
 async function analyzeReviewFacts(base, pageProduct) {
   const detail = await collectDetailContent(pageProduct);
   if (!openaiApiKey || (!detail.imageUrls.length && !detail.detailText)) {
-    return { reviewFacts: detail.detailText ? [detail.detailText.slice(0, 500)] : [], detailText: detail.detailText };
+    return { reviewFacts: cleanReviewFacts([], base.productName), detailText: detail.detailText };
   }
   const content = [{
     type: "input_text",
@@ -227,7 +236,7 @@ async function analyzeReviewFacts(base, pageProduct) {
       required: ["reviewFacts"],
     },
   });
-  return { reviewFacts: result.reviewFacts, detailText: detail.detailText };
+  return { reviewFacts: cleanReviewFacts(result.reviewFacts, base.productName), detailText: detail.detailText };
 }
 
 function optionCode(sellerCode, color, size, analyzedColorCode = "") {
@@ -313,7 +322,7 @@ async function discoverProduct(productId) {
     analysis = {
       confidence: "low",
       options: [{ color: "컬러미상", colorCode: "ET", size: "FREE" }],
-      reviewFacts: detail.detailText ? [detail.detailText.slice(0, 500)] : [`상품명은 ${base.productName}`],
+      reviewFacts: [`${base.productName}에 표현된 디자인 디테일`],
     };
   }
   const resolvedOptions = verifiedProductOptions[productId] || analysis.options;
@@ -326,7 +335,7 @@ async function discoverProduct(productId) {
   base.analysisNote = verifiedProductOptions[productId]
     ? "판매 옵션 검증값 적용"
     : `상세 이미지 AI 분석 · 신뢰도 ${analysis.confidence}`;
-  base.reviewFacts = analysis.reviewFacts;
+  base.reviewFacts = cleanReviewFacts(analysis.reviewFacts, base.productName);
   base.detailText = detail.detailText;
   return base;
 }
