@@ -13,7 +13,7 @@ const productPageCache = new Map();
 const allowedProductImages = new Set();
 const port = Number(process.env.PORT || 4173);
 let openaiApiKey = process.env.OPENAI_API_KEY || "";
-const openaiModel = process.env.OPENAI_MODEL || "gpt-5.5";
+const openaiModel = "gpt-5.4-mini";
 const reviewImageBaseUrl = "https://ecimg.cafe24img.com/pg2689b05693693022/myleffin/review";
 let rateLimitResetAt = null;
 
@@ -195,15 +195,15 @@ async function collectDetailContent(pageProduct) {
     }
   }
   const imageUrls = [...new Set([
+    ...[...descriptionHtml.matchAll(/(?:src|data-src)=["']([^"']+)["']/gi)].map((match) => match[1]),
+    ...(pageProduct?.contents?.imageUrls || []),
+    ...Object.values(pageProduct?.contents?.multiResolutionImages || {}).flat(),
     pageProduct?.imageUrl,
     pageProduct?.thumbnailUrl,
     ...Object.values(pageProduct?.multiResolutionImage || {}),
     ...Object.values(pageProduct?.multiResolutionThumbnail || {}),
     ...Object.values(pageProduct?.multiResolutionThumbnailUrls || {}).flat(),
-    ...(pageProduct?.contents?.imageUrls || []),
-    ...Object.values(pageProduct?.contents?.multiResolutionImages || {}).flat(),
-    ...[...descriptionHtml.matchAll(/(?:src|data-src)=["']([^"']+)["']/gi)].map((match) => match[1]),
-  ].filter((url) => /^https?:\/\//.test(url)))].slice(0, 8);
+  ].filter((url) => /^https?:\/\//.test(url)))].slice(0, 16);
   return { imageUrls, detailText: htmlToText(descriptionHtml).slice(0, 5000) };
 }
 
@@ -214,15 +214,15 @@ async function analyzeReviewFacts(base, pageProduct) {
   }
   const content = [{
     type: "input_text",
-    text: `상품명: ${base.productName}\n카테고리: ${base.category || "여성의류"}\n브랜드: ${base.brand || ""}\n상세페이지 텍스트: ${detail.detailText || "텍스트 없음"}\n상세 이미지에서 리뷰에 활용할 수 있는 사실만 추출하세요. 보이지 않는 소재나 기능은 추측하지 마세요.`,
+    text: `상품명: ${base.productName}\n카테고리: ${base.category || "여성의류"}\n브랜드: ${base.brand || ""}\n상세페이지 텍스트: ${detail.detailText || "텍스트 없음"}\n상세 이미지 안에서 'POINT', 'Comment', 번호가 붙은 핵심 특징, 소재 혼용률, 기능 설명 영역을 OCR로 읽어 리뷰 근거를 추출하세요. 우선순위는 1) Comment 문구 2) 번호형 핵심 포인트 3) 소재 혼용률과 기능 4) 기타 디자인 설명입니다. 서로 중복되는 문구는 합치고, 보이지 않는 소재나 기능은 추측하지 마세요.`,
   }, ...detail.imageUrls.map((image_url) => ({ type: "input_image", image_url }))];
   const result = await callOpenAI({
-    instructions: "여성의류 상세페이지 분석가입니다. 상품명과 상세 이미지·설명에서 직접 확인되는 소재감, 디자인, 핏 구조, 기장, 디테일, 코디 활용 특징을 짧은 한국어 사실 문장으로 정리하세요. 모델 체형이나 효능을 추측하지 마세요.",
+    instructions: "여성의류 상세페이지 분석가입니다. 상세 이미지의 POINT·Comment·소재표에 적힌 문구를 최우선으로 OCR하고, 리뷰에 바로 활용할 수 있는 사실로 정리하세요. 필기체 레터링, 컬러 배색, 자수, 프린팅 같은 디자인 디테일과 정확한 혼용률, 신축성·촉감·착용감·코디 활용 설명을 누락하지 마세요. 각 사실은 서로 다른 내용을 담고 상세페이지에 나온 순서대로 배열하세요. 광고성 수식은 줄이되 의미를 바꾸지 말고, 모델 체형이나 보이지 않는 효능은 추측하지 마세요.",
     input: [{ role: "user", content }],
     schemaName: "queenit_review_facts",
     schema: {
       type: "object", additionalProperties: false,
-      properties: { reviewFacts: { type: "array", minItems: 2, maxItems: 8, items: { type: "string", minLength: 5, maxLength: 100 } } },
+      properties: { reviewFacts: { type: "array", minItems: 3, maxItems: 10, items: { type: "string", minLength: 5, maxLength: 140 } } },
       required: ["reviewFacts"],
     },
   });
@@ -284,10 +284,10 @@ async function discoverProduct(productId) {
 
   const content = [{
     type: "input_text",
-    text: `상품명: ${base.productName}\n카테고리: ${base.category}\n판매자 상품 코드: ${base.sellerCode}\n상세페이지 텍스트: ${detail.detailText || "텍스트 없음"}\n상세설명 이미지의 제품정보 표나 컬러·사이즈 영역에 적힌 문구를 OCR로 정확히 읽으세요. 표에 적힌 컬러와 사이즈를 실제 판매 옵션의 최우선 근거로 사용하고, 이미지 색상 추측보다 우선하세요. 리뷰에 활용할 수 있는 확인된 상품 특징도 정리하세요. 확실하지 않은 값은 추측하지 말고 confidence를 low로 표시하세요.`,
+    text: `상품명: ${base.productName}\n카테고리: ${base.category}\n판매자 상품 코드: ${base.sellerCode}\n상세페이지 텍스트: ${detail.detailText || "텍스트 없음"}\n상세설명 이미지의 제품정보 표나 컬러·사이즈 영역을 OCR로 정확히 읽으세요. 리뷰 특징은 'POINT', 'Comment', 번호형 핵심 설명, 소재 혼용률, 기능 설명 영역을 우선 읽어 상세페이지 순서대로 정리하세요. 예를 들어 레터링·배색·자수 디테일, 코튼/스판 혼용률, 신축성·부드러운 촉감·편안한 착용감·코디 활용 설명을 각각 별도 사실로 남기세요. 확실하지 않은 값은 추측하지 말고 confidence를 low로 표시하세요.`,
   }, ...detail.imageUrls.map((image_url) => ({ type: "input_image", image_url }))];
   const analysis = await callOpenAI({
-    instructions: "당신은 한국 여성의류 쇼핑몰 상품 분석가입니다. 상세설명 이미지에 제품코드·컬러·사이즈 표가 있으면 그 표의 텍스트를 최우선 정답으로 사용하세요. 쉼표로 구분된 컬러는 각각 별도 옵션입니다. 상품명에 있는 멀티, 믹스, 배색, 스트라이프는 디자인 표현이며 실제 컬러 표에 그렇게 적혀 있지 않으면 컬러명으로 사용하지 마세요. 표가 없을 때만 모든 썸네일을 확인해 이미지별 판매 컬러를 추론합니다. 첫 이미지만 보고 나머지 컬러를 누락하지 마세요. 파란색 계열은 단순히 어둡다는 이유로 네이비라고 하지 말고 실제 블루와 네이비를 구분하세요. 각 컬러에는 판매자 옵션코드에 사용할 표준 영문 2자리 colorCode도 지정하세요. 예: 블랙 BK, 화이트 WH, 아이보리 IV, 베이지 BE, 브라운 BR, 네이비 NY, 그레이 GY, 차콜 CG, 핑크 PK, 블루 BL, 라이트블루 LB, 소라 SB, 그린 GN, 카키 KH, 와인 WI, 버건디 BG, 오렌지 OR, 레드 RE, 퍼플 PP, 옐로우 YE, 민트 MT, 크림 CR, 멀티 MX. 또한 소재감·디자인·핏 구조·기장·디테일·활용 특징 중 직접 확인되는 사실을 정리합니다.",
+    instructions: "당신은 한국 여성의류 쇼핑몰 상품 분석가입니다. 상세설명 이미지에 제품코드·컬러·사이즈 표가 있으면 그 표의 텍스트를 최우선 정답으로 사용하세요. 쉼표로 구분된 컬러는 각각 별도 옵션입니다. 상품명에 있는 멀티, 믹스, 배색, 스트라이프는 디자인 표현이며 실제 컬러 표에 그렇게 적혀 있지 않으면 컬러명으로 사용하지 마세요. 표가 없을 때만 모든 썸네일을 확인해 이미지별 판매 컬러를 추론합니다. 첫 이미지만 보고 나머지 컬러를 누락하지 마세요. 파란색 계열은 단순히 어둡다는 이유로 네이비라고 하지 말고 실제 블루와 네이비를 구분하세요. 각 컬러에는 판매자 옵션코드에 사용할 표준 영문 2자리 colorCode도 지정하세요. 예: 블랙 BK, 화이트 WH, 아이보리 IV, 베이지 BE, 브라운 BR, 네이비 NY, 그레이 GY, 차콜 CG, 핑크 PK, 블루 BL, 라이트블루 LB, 소라 SB, 그린 GN, 카키 KH, 와인 WI, 버건디 BG, 오렌지 OR, 레드 RE, 퍼플 PP, 옐로우 YE, 민트 MT, 크림 CR, 멀티 MX. 리뷰 사실은 상세페이지의 POINT·Comment·번호형 특징·소재 혼용률 영역을 최우선으로 OCR하여 순서대로 정리하고, 서로 중복되는 문장은 합치세요.",
     input: [{ role: "user", content }],
     schemaName: "queenit_product_options",
     schema: {
@@ -295,7 +295,7 @@ async function discoverProduct(productId) {
       properties: {
         confidence: { type: "string", enum: ["high", "medium", "low"] },
         options: { type: "array", minItems: 1, maxItems: 30, items: { type: "object", additionalProperties: false, properties: { color: { type: "string" }, colorCode: { type: "string", pattern: "^[A-Z]{2}$" }, size: { type: "string" } }, required: ["color", "colorCode", "size"] } },
-        reviewFacts: { type: "array", minItems: 2, maxItems: 8, items: { type: "string", minLength: 5, maxLength: 100 } },
+        reviewFacts: { type: "array", minItems: 3, maxItems: 10, items: { type: "string", minLength: 5, maxLength: 140 } },
       },
       required: ["confidence", "options", "reviewFacts"],
     },
@@ -570,6 +570,16 @@ async function makeAiReviews(product, optionLabel, previousReviews = [], prefere
   if (!openaiApiKey) return { reviews: makeReviews(product, optionLabel, count, preferences), source: "template" };
   const recent = previousReviews.filter(Boolean).slice(-40);
   const tone = preferences.tone || "간결하게";
+  const reviewNumber = Math.min(5, Math.max(1, Number(preferences.variantIndex) || 1));
+  const focusGuides = [
+    "색상이나 눈에 띄는 디자인을 중심으로 자연스럽게 말하세요.",
+    "실루엣, 길이, 품 중 상세정보로 확인되는 부분을 중심으로 말하세요.",
+    "소재와 착용감 중 상세정보로 뒷받침되는 부분을 중심으로 말하세요.",
+    "평소 옷과의 코디나 실제 입기 좋은 상황을 자연스럽게 연결하세요.",
+    "앞 리뷰에서 다루지 않은 특징 하나를 골라 전체적인 만족감을 말하세요.",
+  ];
+  const orderedDetailFacts = Array.isArray(product.reviewFacts) ? product.reviewFacts.filter(Boolean) : [];
+  const primaryDetailFact = orderedDetailFacts.length ? orderedDetailFacts[(reviewNumber - 1) % orderedDetailFacts.length] : "";
   const reviewLength = preferences.length || "1문장";
   const requestedSentences = Math.min(5, Math.max(1, Number.parseInt(reviewLength, 10) || 1));
   const chatGuide = tone === "채팅"
@@ -584,30 +594,41 @@ async function makeAiReviews(product, optionLabel, previousReviews = [], prefere
     "다섯 리뷰는 각각 상세페이지의 서로 다른 특징을 중심으로 작성하세요.",
     "같은 칭찬이나 결론을 단어만 바꿔 반복하지 마세요. 앞 리뷰를 요약하거나 재진술하는 것도 금지합니다.",
   ].join("\n");
+  const queenitBestReviewStyleGuide = [
+    "퀸잇 카테고리 인기 상품의 실제 후기에서 분석한 말투를 참고하세요. 원문 문장은 복사하지 마세요.",
+    "대부분 한두 가지 포인트만 짧게 말합니다. 모든 장점을 한 리뷰에 몰아넣지 마세요.",
+    "색상, 길이, 허리, 품, 신축성, 두께, 소재처럼 구매자가 바로 느끼는 구체적인 요소를 우선하세요.",
+    "'마음에 들어요', '편해요', '잘 입을 것 같아요'처럼 평범한 생활 어미를 쓰되 다섯 리뷰에서 같은 어미를 반복하지 마세요.",
+    "모든 리뷰를 완벽한 광고 문장처럼 다듬지 말고, 짧고 편안한 구어체 리듬을 유지하세요.",
+    "과도한 칭찬보다 한 가지 만족 이유를 구체적으로 말하세요. 상세정보로 뒷받침될 때는 아쉬운 점이나 개인차도 담담하게 표현할 수 있습니다.",
+    "채팅 말투가 선택된 경우에만 ~, ^^, ㅎㅎ, ㅋㅋ 등을 한 리뷰에 한 번 이하로 자연스럽게 섞으세요.",
+    "배송 인사, 판매자 응원, 아무 상품에나 붙일 수 있는 내용은 사용하지 마세요.",
+  ].join("\n");
   let result;
   try {
     result = await callOpenAI({
     instructions: [
-      "최우선 기준: 아래에 제공된 '상세페이지에서 확인된 특징', 상품명, 옵션, 브랜드에 명시된 사실만 사용하세요.",
-      "상세페이지에 없는 착용 경험, 촉감, 핏, 체형 보완, 품질, 가격 평가, 세탁, 배송, 내구성은 절대 만들거나 추측하지 마세요.",
-      "확인된 특징이 부족하면 새로운 사실을 보태지 말고, 확인된 사실의 표현과 관점만 자연스럽게 바꾸세요.",
-      "당신은 온라인 쇼핑을 자주 하는 40~50대 한국 여성 고객입니다. 설명문을 쓰지 말고 직접 입어 보고 가족이나 친구에게 말하듯 자연스러운 구매 후기를 쓰세요.",
-      "상품명 전체를 되풀이하거나 '상세페이지', '확인된 특징', '분석', '옵션' 같은 판매자·시스템 표현을 리뷰에 쓰지 마세요.",
-      "'~입니다', '~으로 확인됩니다', '~디자인입니다'처럼 상품 정보를 읽어 주는 문체보다 '~해서 좋네요', '~라 마음에 들어요', '~하게 입기 괜찮아요' 같은 생활 말투를 사용하세요. 단, 같은 어미를 반복하지 마세요.",
-      "과장된 감탄, 지나치게 젊은 유행어, 억지스러운 나이 언급은 피하세요. 40~50대라는 말을 리뷰에 직접 넣지 마세요.",
-      "짧은 리뷰라도 구체적인 상품 특징 하나와 그에 대한 자연스러운 느낌을 한 문장 안에 연결하세요.",
+      "당신은 40~50대 한국 여성 고객의 자연스러운 쇼핑 후기 작성자입니다.",
+      "제공된 상세정보를 사실의 기준으로 삼되, 정보를 설명하거나 요약하지 말고 실제로 받아서 입어 본 사람이 남기는 후기처럼 풀어 쓰세요.",
+      "확인된 색상, 디자인, 소재, 길이, 핏 정보를 바탕으로 한 일상적인 느낌과 코디 의견은 자연스럽게 표현해도 됩니다. 다만 상세정보와 모순되는 내용이나 새로운 기능·수치는 만들지 마세요.",
+      "상품명 전체, '상세페이지', '확인된 특징', '분석', '옵션' 같은 판매자·시스템 표현은 리뷰에 쓰지 마세요.",
+      "40~50대라는 나이를 직접 밝히지 말고, 지나치게 젊은 유행어나 과장된 감탄도 피하세요.",
+      "짧은 리뷰라도 구체적인 상품 특징과 실제로 입었을 때의 느낌을 한 문장 안에서 자연스럽게 연결하세요.",
+      `이번 ${reviewNumber}번 리뷰 방향: ${focusGuides[reviewNumber - 1]} 해당 내용이 상세정보에 없으면 확인되는 다른 특징을 사용하세요.`,
+      primaryDetailFact ? `이번 리뷰의 최우선 근거는 상세페이지에서 추출한 다음 내용입니다: ${primaryDetailFact} 이 문장을 그대로 복사하지 말고 실제 사용자의 느낌으로 풀어 쓰세요.` : "상세페이지에서 확인되는 구체적인 특징 하나를 중심으로 쓰세요.",
       "서로 다른 사람이 쓴 것처럼 말투, 문장 길이, 관심 포인트를 확실히 다르게 하세요.",
       "광고 문구나 지나친 칭찬을 피하고 일상적인 표현을 사용하세요.",
       "직접 확인할 수 없는 세탁 결과, 배송 속도, 내구성은 단정하지 마세요.",
       "이전에 생성한 리뷰와 문장 구조나 핵심 표현이 겹치지 않게 하세요.",
-      "상품정보 분석 문장을 그대로 복사하거나 명사만 나열하지 말고 실제 후기 말투로 바꾸세요.",
+      "상품정보 문장을 그대로 복사하거나 명사만 나열하지 말고 실제 후기 말투로 바꾸세요.",
       "다음 표현은 사용하지 마세요: 목을 조이지 않아서, 기본형, FREE라서, 가성비 기준으로 보면, 가격 생각하면, 가격을 생각하면, 46-50대인 저도, 가성비로 보면, 체형커버가 되는 쪽으로 보면, 체형커버로 보니, 가성비를 따져보면, 목에 닿는 부분이 까슬하지 않아서, 소매가 손목까지 와서 팔 움직일 때 허전하지 않았고, 라운드넥 반팔 티셔츠 디자인이다, 핏감이 생각보다 여유 있어서, 44~55 사이즈, 허리선 아래로 떨어지는 짧은 길이라 답답하지 않고, 가성비를 먼저 따져보면, 보더패턴, 둥글게 내려오는 밑단, 가성비를 먼저 보게 되는데, 가성비를 먼저 보게 되는 옷인데, 옵션인데도, 44사이즈인 제게도.",
       "같은 상품의 앞 리뷰와 첫 문장의 시작 단어나 도입 방식이 비슷하면 완전히 다른 상황이나 표현으로 시작하세요.",
+      queenitBestReviewStyleGuide,
       sequentialDiversityGuide,
       chatGuide,
       `각 리뷰는 반드시 정확히 ${requestedSentences}개의 완전한 문장으로 작성하세요. 문장 수를 임의로 늘리거나 줄이지 말고, 불필요한 줄바꿈은 사용하지 마세요.`,
     ].join("\n"),
-    input: `상품명: ${product.productName}\n카테고리: ${product.category || productType(product.productName)}\n선택한 색상·사이즈: ${optionLabel}\n브랜드: ${product.brand || ""}\n상세페이지에서 확인된 특징:\n${Array.isArray(product.reviewFacts) && product.reviewFacts.length ? product.reviewFacts.map((fact) => `- ${fact}`).join("\n") : (product.detailText || "확인된 추가 특징 없음")}\n작성자 성별: ${preferences.gender || "여성"}\n연령대: ${preferences.age || "41~45"}\n말투: ${tone}\n리뷰 번호: ${preferences.variantIndex || 1}/5\n리뷰 길이: 정확히 ${requestedSentences}문장\n추가 명령: ${preferences.command || "없음"}\n\n앞 번호까지 생성된 리뷰(내용과 표현 반복 금지):\n${recent.length ? recent.map((v, i) => `${i + 1}. ${v}`).join("\n") : "없음"}\n\n현재 번호의 리뷰를 작성하기 전에 앞 리뷰를 모두 비교하세요. 확인된 사실만 사용하되, 실제 구매자가 쓴 것처럼 자연스럽게 풀어 쓰고 앞 리뷰와 중심 특징·첫 문장·표현·결론이 모두 다르게 작성하세요.`,
+    input: `상품명: ${product.productName}\n카테고리: ${product.category || productType(product.productName)}\n선택한 색상·사이즈: ${optionLabel}\n브랜드: ${product.brand || ""}\n상세페이지 POINT·Comment·소재표에서 확인된 특징(표시 순서):\n${orderedDetailFacts.length ? orderedDetailFacts.map((fact, index) => `${index + 1}. ${fact}`).join("\n") : (product.detailText || "확인된 추가 특징 없음")}\n이번 리뷰의 우선 근거: ${primaryDetailFact || "위 특징 중 앞 리뷰에서 쓰지 않은 내용"}\n작성자 성별: ${preferences.gender || "여성"}\n연령대: ${preferences.age || "41~45"}\n말투: ${tone}\n리뷰 번호: ${reviewNumber}/5\n리뷰 길이: 정확히 ${requestedSentences}문장\n추가 명령: ${preferences.command || "없음"}\n\n앞 번호까지 생성된 리뷰(반복 금지):\n${recent.length ? recent.map((v, i) => `${i + 1}. ${v}`).join("\n") : "없음"}\n\n광고 문구를 피하고 실제 구매자가 편하게 쓴 후기 말투로 작성하세요. 앞 리뷰와 소재·첫 문장·핵심 장점·말투가 겹치면 다른 관점으로 바꾸세요.`,
     schemaName: "queenit_reviews",
     schema: {
       type: "object", additionalProperties: false,
