@@ -77,7 +77,7 @@ function outputText(response) {
     .join("");
 }
 
-async function callOpenAI({ instructions, input, schemaName, schema }) {
+async function callOpenAI({ instructions, input, schemaName, schema, timeoutMs = 60000 }) {
   if (!openaiApiKey) throw new Error("OPENAI_API_KEY가 설정되지 않았습니다.");
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
@@ -89,7 +89,7 @@ async function callOpenAI({ instructions, input, schemaName, schema }) {
       reasoning: { effort: "low" },
       text: { format: { type: "json_schema", name: schemaName, strict: true, schema } },
     }),
-    signal: AbortSignal.timeout(60000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const payload = await response.json();
   if (!response.ok) throw new Error(payload?.error?.message || "OpenAI API 요청에 실패했습니다.");
@@ -204,7 +204,7 @@ async function collectDetailContent(pageProduct) {
     ...Object.values(pageProduct?.multiResolutionImage || {}),
     ...Object.values(pageProduct?.multiResolutionThumbnail || {}),
     ...Object.values(pageProduct?.multiResolutionThumbnailUrls || {}).flat(),
-  ].filter((url) => /^https?:\/\//.test(url)))].slice(0, 10);
+  ].filter((url) => /^https?:\/\//.test(url)))].slice(0, 24);
   return { imageUrls, detailText: htmlToText(descriptionHtml).slice(0, 5000) };
 }
 
@@ -216,7 +216,7 @@ async function analyzeReviewFacts(base, pageProduct) {
   const content = [{
     type: "input_text",
     text: `상품명: ${base.productName}\n카테고리: ${base.category || "여성의류"}\n브랜드: ${base.brand || ""}\n상세페이지 텍스트: ${detail.detailText || "텍스트 없음"}\n상세 이미지 안에서 'POINT', 'Comment', 번호가 붙은 핵심 특징, 소재 혼용률, 기능 설명 영역을 OCR로 읽어 리뷰 근거를 추출하세요. 우선순위는 1) Comment 문구 2) 번호형 핵심 포인트 3) 소재 혼용률과 기능 4) 기타 디자인 설명입니다. 서로 중복되는 문구는 합치고, 보이지 않는 소재나 기능은 추측하지 마세요.`,
-  }, ...detail.imageUrls.map((image_url) => ({ type: "input_image", image_url }))];
+  }, ...detail.imageUrls.slice(0, 10).map((image_url) => ({ type: "input_image", image_url }))];
   const result = await callOpenAI({
     instructions: "여성의류 상세페이지 분석가입니다. 상세 이미지의 POINT·Comment·소재표에 적힌 문구를 최우선으로 OCR하고, 리뷰에 바로 활용할 수 있는 사실로 정리하세요. 필기체 레터링, 컬러 배색, 자수, 프린팅 같은 디자인 디테일과 정확한 혼용률, 신축성·촉감·착용감·코디 활용 설명을 누락하지 마세요. 각 사실은 서로 다른 내용을 담고 상세페이지에 나온 순서대로 배열하세요. 광고성 수식은 줄이되 의미를 바꾸지 말고, 모델 체형이나 보이지 않는 효능은 추측하지 마세요.",
     input: [{ role: "user", content }],
@@ -283,16 +283,21 @@ async function discoverProduct(productId) {
     return base;
   }
 
+  const optionAnalysisImages = [...new Set([
+    ...detail.imageUrls.slice(0, 6),
+    ...detail.imageUrls.slice(-8),
+  ])].slice(0, 12);
   const content = [{
     type: "input_text",
     text: `상품명: ${base.productName}\n카테고리: ${base.category}\n판매자 상품 코드: ${base.sellerCode}\n상세페이지 텍스트: ${detail.detailText || "텍스트 없음"}\n상세설명 이미지의 제품정보 표나 컬러·사이즈 영역을 OCR로 정확히 읽으세요. 리뷰 특징은 'POINT', 'Comment', 번호형 핵심 설명, 소재 혼용률, 기능 설명 영역을 우선 읽어 상세페이지 순서대로 정리하세요. 예를 들어 레터링·배색·자수 디테일, 코튼/스판 혼용률, 신축성·부드러운 촉감·편안한 착용감·코디 활용 설명을 각각 별도 사실로 남기세요. 확실하지 않은 값은 추측하지 말고 confidence를 low로 표시하세요.`,
-  }, ...detail.imageUrls.map((image_url) => ({ type: "input_image", image_url }))];
+  }, ...optionAnalysisImages.map((image_url) => ({ type: "input_image", image_url }))];
   let analysis;
   try {
     analysis = await callOpenAI({
     instructions: "당신은 한국 여성의류 쇼핑몰 상품 분석가입니다. 상세설명 이미지에 제품코드·컬러·사이즈 표가 있으면 그 표의 텍스트를 최우선 정답으로 사용하세요. 쉼표로 구분된 컬러는 각각 별도 옵션입니다. 상품명에 있는 멀티, 믹스, 배색, 스트라이프는 디자인 표현이며 실제 컬러 표에 그렇게 적혀 있지 않으면 컬러명으로 사용하지 마세요. 표가 없을 때만 모든 썸네일을 확인해 이미지별 판매 컬러를 추론합니다. 첫 이미지만 보고 나머지 컬러를 누락하지 마세요. 파란색 계열은 단순히 어둡다는 이유로 네이비라고 하지 말고 실제 블루와 네이비를 구분하세요. 각 컬러에는 판매자 옵션코드에 사용할 표준 영문 2자리 colorCode도 지정하세요. 예: 블랙 BK, 화이트 WH, 아이보리 IV, 베이지 BE, 브라운 BR, 네이비 NY, 그레이 GY, 차콜 CG, 핑크 PK, 블루 BL, 라이트블루 LB, 소라 SB, 그린 GN, 카키 KH, 와인 WI, 버건디 BG, 오렌지 OR, 레드 RE, 퍼플 PP, 옐로우 YE, 민트 MT, 크림 CR, 멀티 MX. 리뷰 사실은 상세페이지의 POINT·Comment·번호형 특징·소재 혼용률 영역을 최우선으로 OCR하여 순서대로 정리하고, 서로 중복되는 문장은 합치세요.",
     input: [{ role: "user", content }],
     schemaName: "queenit_product_options",
+    timeoutMs: 90000,
     schema: {
       type: "object", additionalProperties: false,
       properties: {
