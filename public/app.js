@@ -32,15 +32,26 @@ function imageFeature(source, isFile = false) {
         context.drawImage(image, 0, 0, 48, 48);
         const pixels = context.getImageData(0, 0, 48, 48).data;
         let r = 0, g = 0, b = 0, count = 0;
+        const histogram = Array(64).fill(0);
         for (let i = 0; i < pixels.length; i += 4) {
           const pr = pixels[i], pg = pixels[i + 1], pb = pixels[i + 2];
           const max = Math.max(pr, pg, pb), min = Math.min(pr, pg, pb);
           if (max > 242 && min > 235) continue;
           if (max - min < 8 && max > 220) continue;
           r += pr; g += pg; b += pb; count += 1;
+          histogram[(Math.min(3, pr >> 6) * 16) + (Math.min(3, pg >> 6) * 4) + Math.min(3, pb >> 6)] += 1;
         }
         if (!count) count = 1;
-        resolve({ rgb:[r / count, g / count, b / count], ratio:image.naturalWidth / Math.max(1, image.naturalHeight) });
+        const normalizedHistogram = histogram.map((value) => value / count);
+        const hashCanvas = document.createElement("canvas"); hashCanvas.width = 9; hashCanvas.height = 8;
+        const hashContext = hashCanvas.getContext("2d", { willReadFrequently:true });
+        hashContext.drawImage(image, 0, 0, 9, 8);
+        const hashPixels = hashContext.getImageData(0, 0, 9, 8).data;
+        const luminance = [];
+        for (let i = 0; i < hashPixels.length; i += 4) luminance.push(hashPixels[i] * .299 + hashPixels[i + 1] * .587 + hashPixels[i + 2] * .114);
+        const hash = [];
+        for (let y = 0; y < 8; y += 1) for (let x = 0; x < 8; x += 1) hash.push(luminance[y * 9 + x] > luminance[y * 9 + x + 1] ? 1 : 0);
+        resolve({ rgb:[r / count, g / count, b / count], histogram:normalizedHistogram, hash, ratio:image.naturalWidth / Math.max(1, image.naturalHeight) });
       } catch (error) { reject(error); }
       finally { if (objectUrl) URL.revokeObjectURL(objectUrl); }
     };
@@ -51,6 +62,15 @@ function imageFeature(source, isFile = false) {
 
 function rgbDistance(left, right) {
   return Math.sqrt(left.reduce((sum, value, index) => sum + ((value - right[index]) ** 2), 0)) / 441.7;
+}
+
+function histogramDistance(left, right) {
+  return 1 - left.reduce((sum, value, index) => sum + Math.min(value, right[index] || 0), 0);
+}
+
+function hashDistance(left, right) {
+  if (!left?.length || left.length !== right?.length) return .5;
+  return left.reduce((sum, value, index) => sum + (value === right[index] ? 0 : 1), 0) / left.length;
 }
 
 function optionColorDistance(feature, label) {
@@ -74,15 +94,17 @@ async function matchUploadedImages() {
     for (const slotIndex of available) {
       const slot = slots[slotIndex];
       const option = slot.state.product.options.find((item) => item.code === slot.code);
-      const productDistance = slot.state.productFeature ? rgbDistance(uploaded.feature.rgb, slot.state.productFeature.rgb) : 0.35;
+      const productColorDistance = slot.state.productFeature ? rgbDistance(uploaded.feature.rgb, slot.state.productFeature.rgb) : 0.35;
+      const productHistogramDistance = slot.state.productFeature ? histogramDistance(uploaded.feature.histogram, slot.state.productFeature.histogram) : 0.4;
+      const productShapeDistance = slot.state.productFeature ? hashDistance(uploaded.feature.hash, slot.state.productFeature.hash) : 0.45;
       const ratioDistance = slot.state.productFeature ? Math.min(1, Math.abs(uploaded.feature.ratio - slot.state.productFeature.ratio)) : 0.2;
       const colorDistance = optionColorDistance(uploaded.feature, option?.label);
-      const score = productDistance * 0.5 + colorDistance * 0.4 + ratioDistance * 0.1;
+      const score = productShapeDistance * 0.4 + productHistogramDistance * 0.15 + productColorDistance * 0.1 + colorDistance * 0.3 + ratioDistance * 0.05;
       if (!best || score < best.score) best = { slotIndex, slot, score };
     }
     if (!best) break;
     available.delete(best.slotIndex);
-    const confidence = best.score < 0.22 ? "높음" : best.score < 0.4 ? "보통" : "확인 필요";
+    const confidence = best.score < 0.25 ? "높음" : best.score < 0.43 ? "보통" : "확인 필요";
     const matched = { ...uploaded, confidence, score:best.score };
     best.slot.state.matchedImages[best.slot.index] = matched;
   }
