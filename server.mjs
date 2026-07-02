@@ -602,14 +602,22 @@ async function makeAiReviews(product, optionLabel, previousReviews = [], prefere
   const tone = preferences.tone || "간결하게";
   const reviewNumber = Math.min(5, Math.max(1, Number(preferences.variantIndex) || 1));
   const focusGuides = [
-    "색상이나 눈에 띄는 디자인을 중심으로 자연스럽게 말하세요.",
-    "실루엣, 길이, 품 중 상세정보로 확인되는 부분을 중심으로 말하세요.",
-    "소재와 착용감 중 상세정보로 뒷받침되는 부분을 중심으로 말하세요.",
-    "평소 옷과의 코디나 실제 입기 좋은 상황을 자연스럽게 연결하세요.",
-    "앞 리뷰에서 다루지 않은 특징 하나를 골라 전체적인 만족감을 말하세요.",
+    "상세페이지에서 확인된 소재, 조직감, 두께, 신축성 중 하나와 계절 착용감을 자연스럽게 연결하세요.",
+    "레터링, 자수, 프린팅, 배색, 러플, 스트라이프 등 실제로 확인되는 디자인 디테일과 옷의 분위기를 연결하세요.",
+    "길이, 품, 루즈핏, 소매, 넥라인 등 확인된 실루엣을 중심으로 편안함이나 체형 보완 느낌을 자연스럽게 말하세요. 상세정보에 없는 핏은 만들지 마세요.",
+    "단독 착용, 레이어드, 팬츠·스커트 매치, 데일리·여행·모임 등 상세페이지에서 뒷받침되는 코디 활용을 중심으로 말하세요.",
+    "앞 리뷰에서 사용하지 않은 특징을 골라 소재·디자인·활용성의 전체적인 만족감을 자연스럽게 정리하세요.",
   ];
   const orderedDetailFacts = Array.isArray(product.reviewFacts) ? product.reviewFacts.filter(Boolean) : [];
-  const primaryDetailFact = orderedDetailFacts.length ? orderedDetailFacts[(reviewNumber - 1) % orderedDetailFacts.length] : "";
+  const focusPatterns = [
+    /소재|원단|코튼|면|스판|린넨|라미|니트|메쉬|우븐|신축|두께|촉감|통기|시원/,
+    /레터링|자수|프린트|프린팅|배색|러플|스트라이프|리본|장식|디테일|패턴|레이스/,
+    /핏|실루엣|기장|길이|품|루즈|박시|소매|넥|체형|라인|밴딩/,
+    /코디|활용|레이어드|단독|팬츠|스커트|데일리|여행|휴양|모임|외출|가디건/,
+    /./,
+  ];
+  const primaryDetailFact = orderedDetailFacts.find((fact) => focusPatterns[reviewNumber - 1].test(fact))
+    || (orderedDetailFacts.length ? orderedDetailFacts[(reviewNumber - 1) % orderedDetailFacts.length] : "");
   const reviewLength = preferences.length || "1문장";
   const requestedSentences = Math.min(5, Math.max(1, Number.parseInt(reviewLength, 10) || 1));
   const chatGuide = tone === "채팅"
@@ -634,6 +642,16 @@ async function makeAiReviews(product, optionLabel, previousReviews = [], prefere
     "채팅 말투가 선택된 경우에만 ~, ^^, ㅎㅎ, ㅋㅋ 등을 한 리뷰에 한 번 이하로 자연스럽게 섞으세요.",
     "배송 인사, 판매자 응원, 아무 상품에나 붙일 수 있는 내용은 사용하지 마세요.",
   ].join("\n");
+  const sharedSellerReviewStyleGuide = [
+    "사용자가 제공한 우수 판매자 리뷰 예시의 구조와 말투를 따르되 예시 문장을 그대로 복사하지 마세요.",
+    "다섯 리뷰의 역할은 1번 소재와 계절감, 2번 디자인 디테일과 분위기, 3번 핏과 편안함, 4번 코디와 활용성, 5번 전체적인 만족감입니다.",
+    "각 리뷰는 상세페이지 POINT 한두 개만 선택해 실제로 입어 본 느낌처럼 자연스럽게 풀어 쓰세요.",
+    "친근하고 정돈된 판매자 후기 말투를 사용하고, 기본 어미는 '~예요', '~좋아요', '~마음에 들어요', '~같아요'를 상황에 맞게 번갈아 사용하세요.",
+    "같은 문장 시작, 같은 장점, 같은 코디, 같은 종결어미를 다섯 리뷰에서 반복하지 마세요.",
+    "1문장 설정이면 핵심 특징과 착용 느낌을 두 절로 연결한 한 문장만 쓰고, 2~3문장 설정이면 특징 설명과 착용·코디 느낌을 나누어 쓰세요.",
+    "'소장 가치', '완성도', '무드 완성', '스타일이 살아나요' 같은 판매 문구를 매 리뷰마다 반복하지 말고 꼭 어울릴 때만 사용하세요.",
+    "상세페이지에서 확인되지 않은 통기성, 신축성, 체형 커버, 계절감, 비침, 촉감은 임의로 추가하지 마세요.",
+  ].join("\n");
   let result;
   try {
     result = await callOpenAI({
@@ -653,6 +671,7 @@ async function makeAiReviews(product, optionLabel, previousReviews = [], prefere
       "상품정보 문장을 그대로 복사하거나 명사만 나열하지 말고 실제 후기 말투로 바꾸세요.",
       "다음 표현은 사용하지 마세요: 목을 조이지 않아서, 기본형, FREE라서, 가성비 기준으로 보면, 가격 생각하면, 가격을 생각하면, 46-50대인 저도, 가성비로 보면, 체형커버가 되는 쪽으로 보면, 체형커버로 보니, 가성비를 따져보면, 목에 닿는 부분이 까슬하지 않아서, 소매가 손목까지 와서 팔 움직일 때 허전하지 않았고, 라운드넥 반팔 티셔츠 디자인이다, 핏감이 생각보다 여유 있어서, 44~55 사이즈, 허리선 아래로 떨어지는 짧은 길이라 답답하지 않고, 가성비를 먼저 따져보면, 보더패턴, 둥글게 내려오는 밑단, 가성비를 먼저 보게 되는데, 가성비를 먼저 보게 되는 옷인데, 옵션인데도, 44사이즈인 제게도.",
       "같은 상품의 앞 리뷰와 첫 문장의 시작 단어나 도입 방식이 비슷하면 완전히 다른 상황이나 표현으로 시작하세요.",
+      sharedSellerReviewStyleGuide,
       queenitBestReviewStyleGuide,
       sequentialDiversityGuide,
       chatGuide,
