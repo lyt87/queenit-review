@@ -1,0 +1,935 @@
+import http from "node:http";
+import fs from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
+import crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
+
+const root = path.dirname(fileURLToPath(import.meta.url));
+const publicDir = path.join(root, "public");
+const productsPayload = JSON.parse(await fs.readFile(path.join(root, "data", "options.json"), "utf8"));
+const products = productsPayload.products;
+let sabangColorRows = [];
+try {
+  sabangColorRows = JSON.parse(await fs.readFile(path.join(root, "data", "color-codes.json"), "utf8"));
+} catch {
+  sabangColorRows = [];
+}
+const productPageCache = new Map();
+const allowedProductImages = new Set();
+const port = Number(process.env.PORT || 4173);
+let openaiApiKey = process.env.OPENAI_API_KEY || "";
+const openaiModel = "gpt-5.4-mini";
+const reviewImageBaseUrl = "https://ecimg.cafe24img.com/pg2689b05693693022/myleffin/review";
+let rateLimitResetAt = null;
+
+function rateLimitResetFromMessage(message = "") {
+  const match = message.match(/try again in\s+(?:(\d+)h)?(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s)?/i);
+  if (!match) return null;
+  const milliseconds = ((Number(match[1]) || 0) * 3600 + (Number(match[2]) || 0) * 60 + (Number(match[3]) || 0)) * 1000;
+  return milliseconds > 0 ? Date.now() + milliseconds : null;
+}
+
+function normalizeColorName(value = "") {
+  return String(value || "").replace(/[\s_\-/()[\]{}·,]/g, "").toLowerCase();
+}
+
+const colorCodes = Object.fromEntries(
+  sabangColorRows
+    .filter((row) => row?.code && row?.name)
+    .map((row) => [String(row.name).trim(), String(row.code).trim().toUpperCase()])
+);
+const colorAliases = [
+  ...sabangColorRows
+    .filter((row) => row?.code && row?.name)
+    .map((row) => ({ code: String(row.code).trim().toUpperCase(), names: [String(row.name).trim()] })),
+  { code: colorCodes["블랙"], names: ["검정", "검은색"] },
+  { code: colorCodes["화이트"], names: ["흰색", "백색"] },
+  { code: colorCodes["네이비"], names: ["남색"] },
+  { code: colorCodes["그레이"], names: ["회색"] },
+  { code: colorCodes["핑크"], names: ["분홍"] },
+  { code: colorCodes["블루"], names: ["파랑", "청색"] },
+  { code: colorCodes["그린"], names: ["초록"] },
+  { code: colorCodes["브라운"], names: ["갈색"] },
+  { code: colorCodes["레드"], names: ["빨강", "적색"] },
+  { code: colorCodes["오렌지"], names: ["주황"] },
+  { code: colorCodes["옐로우"], names: ["노랑"] },
+  { code: colorCodes["스카이블루"], names: ["소라"] },
+  { code: colorCodes["바이올렛"], names: ["퍼플", "보라"] },
+  { code: colorCodes["아이보리"], names: ["오프화이트"] },
+].filter((entry) => entry.code);
+const sizeCodes = { FREE: "FF", 프리: "FF", 원사이즈: "FF", ONESIZE: "FF", "ONE SIZE": "FF", ONE: "FF", F: "FF", S: "S", M: "M", L: "L", XL: "XL", XXL: "XXL" };
+const verifiedProductOptions = {
+  e2af82261a046cbd1a488407f924fcb1: [
+    { color: "블루", colorCode: "BL", size: "FREE" },
+    { color: "브라운", colorCode: "BR", size: "FREE" },
+  ],
+  "3935acd3de0eb80617101a61dd8c4aa5": [
+    { color: "블루", colorCode: "BL", size: "FREE" },
+  ],
+};
+
+function outputText(response) {
+  return (response.output || [])
+    .flatMap((item) => item.content || [])
+    .filter((item) => item.type === "output_text")
+    .map((item) => item.text)
+    .join("");
+}
+
+async function callOpenAI({ instructions, input, schemaName, schema, timeoutMs = 60000 }) {
+  if (!openaiApiKey) throw new Error("OPENAI_API_KEY가 설정되지 않았습니다.");
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${openaiApiKey}` },
+    body: JSON.stringify({
+      model: openaiModel,
+      instructions,
+      input,
+      reasoning: { effort: "low" },
+      text: { format: { type: "json_schema", name: schemaName, strict: true, schema } },
+    }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload?.error?.message || "OpenAI API 요청에 실패했습니다.");
+  const text = outputText(payload);
+  if (!text) throw new Error("AI 응답에서 결과를 찾지 못했습니다.");
+  return JSON.parse(text);
+}
+
+function extractJsonObject(html, marker) {
+  const markerIndex = html.indexOf(marker);
+  if (markerIndex < 0) return null;
+  const start = html.indexOf("{", markerIndex);
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < html.length; i += 1) {
+    const char = html[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === "{") depth += 1;
+    else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return JSON.parse(html.slice(start, i + 1));
+    }
+  }
+  return null;
+}
+
+function htmlToText(html = "") {
+  return String(html)
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;|&#160;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeImageUrl(value = "") {
+  const text = String(value).trim();
+  const srcMatch = text.match(/<img[^>]+src=["']([^"']+)["']/i);
+  const url = (srcMatch?.[1] || text).trim();
+  return /^https?:\/\//i.test(url) ? url : "";
+}
+
+function cleanReviewFacts(facts, productName = "상품") {
+  const cleaned = (Array.isArray(facts) ? facts : [])
+    .map((fact) => String(fact || "").replace(/[【】{}\[\]]/g, "").replace(/\s+/g, " ").trim())
+    .filter((fact) => fact.length >= 5 && fact.length <= 180)
+    .filter((fact) => (fact.match(/,/g) || []).length <= 4)
+    .filter((fact) => !/(MD추천|주문폭주|40대여성의류|50대여성의류|중년여성|미시룩|엄마옷)/i.test(fact));
+  return cleaned.length ? [...new Set(cleaned)].slice(0, 10) : [`${productName}에 표현된 디자인 디테일`];
+}
+
+function escapeHtmlAttribute(value = "") {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+async function isReachableImage(url) {
+  if (!/^https?:\/\//i.test(String(url || ""))) return false;
+  const attempts = [
+    { method: "HEAD", headers: {} },
+    { method: "GET", headers: { Range: "bytes=0-1023" } },
+  ];
+  for (const attempt of attempts) {
+    try {
+      const response = await fetch(url, {
+        method: attempt.method,
+        headers: { "User-Agent": "Mozilla/5.0 QueenitReviewMaker/5.0", ...attempt.headers },
+        redirect: "follow",
+        signal: AbortSignal.timeout(8000),
+      });
+      const contentType = response.headers.get("content-type") || "";
+      if (response.body) await response.body.cancel().catch(() => {});
+      if (response.ok && /^image\//i.test(contentType)) return true;
+    } catch {
+      // GET 방식으로 한 번 더 확인합니다.
+    }
+  }
+  return false;
+}
+
+async function collectDetailContent(pageProduct) {
+  let descriptionHtml = "";
+  const descriptionUrls = [
+    pageProduct?.contents?.descriptionFileUri,
+    pageProduct?.contents?.descriptionPageUrl,
+  ].filter(Boolean).map((url) => url.replace(/^http:/, "https:"));
+  for (const descriptionUrl of descriptionUrls) {
+    try {
+      const response = await fetch(descriptionUrl, {
+        headers: { "User-Agent": "Mozilla/5.0 QueenitReviewMaker/4.0" },
+        signal: AbortSignal.timeout(15000),
+      });
+      if (response.ok) {
+        descriptionHtml = await response.text();
+        if (descriptionHtml) break;
+      }
+    } catch {
+      // 다음 상세설명 주소를 시도합니다.
+    }
+  }
+  const imageUrls = [...new Set([
+    ...[...descriptionHtml.matchAll(/(?:src|data-src)=["']([^"']+)["']/gi)].map((match) => match[1]),
+    ...(pageProduct?.contents?.imageUrls || []),
+    ...Object.values(pageProduct?.contents?.multiResolutionImages || {}).flat(),
+    pageProduct?.imageUrl,
+    pageProduct?.thumbnailUrl,
+    ...Object.values(pageProduct?.multiResolutionImage || {}),
+    ...Object.values(pageProduct?.multiResolutionThumbnail || {}),
+    ...Object.values(pageProduct?.multiResolutionThumbnailUrls || {}).flat(),
+  ].filter((url) => /^https?:\/\//.test(url) && /\.(?:jpe?g|png|webp)(?:[?#]|$)/i.test(url)))].slice(0, 24);
+  return { imageUrls, detailText: htmlToText(descriptionHtml).slice(0, 5000) };
+}
+
+async function analyzeReviewFacts(base, pageProduct) {
+  const detail = await collectDetailContent(pageProduct);
+  if (!openaiApiKey || (!detail.imageUrls.length && !detail.detailText)) {
+    return { reviewFacts: cleanReviewFacts([], base.productName), detailText: detail.detailText };
+  }
+  const content = [{
+    type: "input_text",
+    text: `상품명: ${base.productName}\n카테고리: ${base.category || "여성의류"}\n브랜드: ${base.brand || ""}\n상세페이지 텍스트: ${detail.detailText || "텍스트 없음"}\n상세 이미지 안에서 'POINT', 'Comment', 번호가 붙은 핵심 특징, 소재 혼용률, 기능 설명 영역을 OCR로 읽어 리뷰 근거를 추출하세요. 우선순위는 1) Comment 문구 2) 번호형 핵심 포인트 3) 소재 혼용률과 기능 4) 기타 디자인 설명입니다. 서로 중복되는 문구는 합치고, 보이지 않는 소재나 기능은 추측하지 마세요.`,
+  }, ...detail.imageUrls.slice(0, 10).map((image_url) => ({ type: "input_image", image_url }))];
+  const result = await callOpenAI({
+    instructions: "여성의류 상세페이지 분석가입니다. 상세 이미지의 POINT·Comment·소재표에 적힌 문구를 최우선으로 OCR하고, 리뷰에 바로 활용할 수 있는 사실로 정리하세요. 필기체 레터링, 컬러 배색, 자수, 프린팅 같은 디자인 디테일과 정확한 혼용률, 신축성·촉감·착용감·코디 활용 설명을 누락하지 마세요. 각 사실은 서로 다른 내용을 담고 상세페이지에 나온 순서대로 배열하세요. 광고성 수식은 줄이되 의미를 바꾸지 말고, 모델 체형이나 보이지 않는 효능은 추측하지 마세요.",
+    input: [{ role: "user", content }],
+    schemaName: "queenit_review_facts",
+    schema: {
+      type: "object", additionalProperties: false,
+      properties: { reviewFacts: { type: "array", minItems: 3, maxItems: 10, items: { type: "string", minLength: 5, maxLength: 140 } } },
+      required: ["reviewFacts"],
+    },
+  });
+  return { reviewFacts: cleanReviewFacts(result.reviewFacts, base.productName), detailText: detail.detailText };
+}
+
+function optionCodeInfo(sellerCode, color, size, analyzedColorCode = "") {
+  const normalizedSize = String(size || "FREE").toUpperCase();
+  const normalizedColor = normalizeColorName(color);
+  const exactCode = sabangColorRows.find((row) => normalizeColorName(row?.name) === normalizedColor)?.code;
+  const aliasCode = exactCode || [...colorAliases]
+    .sort((a, b) => Math.max(...b.names.map((name) => normalizeColorName(name).length)) - Math.max(...a.names.map((name) => normalizeColorName(name).length)))
+    .find((entry) => entry.names.some((name) => normalizedColor.includes(normalizeColorName(name))))?.code;
+  const knownCodes = new Set(sabangColorRows.map((row) => String(row.code || "").trim().toUpperCase()).filter(Boolean));
+  const explicitCode = /^[A-Z]{2}$/.test(String(analyzedColorCode || "").toUpperCase())
+    && knownCodes.has(String(analyzedColorCode).toUpperCase())
+    ? String(analyzedColorCode).toUpperCase()
+    : "";
+  const colorCode = aliasCode || colorCodes[color] || explicitCode;
+  const sizeCode = sizeCodes[normalizedSize] || (/^\d+$/.test(normalizedSize) ? normalizedSize : normalizedSize);
+  return {
+    code: colorCode ? `${sellerCode}${colorCode}${sizeCode}` : "",
+    colorCode: colorCode || "",
+    sizeCode,
+    codeRequired: !colorCode,
+    message: colorCode ? "" : "옵션코드를 입력해 주세요",
+  };
+}
+
+async function discoverProduct(productId) {
+  const pageResponse = await fetch(`https://web.queenit.kr/product/${encodeURIComponent(productId)}`, {
+    headers: { "User-Agent": "Mozilla/5.0 QueenitReviewMaker/2.0" },
+  });
+  if (!pageResponse.ok) throw new Error(`상품 상세페이지를 불러오지 못했습니다. (${pageResponse.status})`);
+  const html = await pageResponse.text();
+  const product = extractJsonObject(html, '"product":{"productId"');
+  if (!product?.productId) throw new Error("상세페이지에서 상품 정보를 찾지 못했습니다.");
+  const contents = extractJsonObject(html, '"contents":{"imageUrls"');
+  if (contents) product.contents = contents;
+
+  const base = {
+    productId: product.productId,
+    productName: product.name || "새 상품",
+    sellerCode: product.mallProductCode || "",
+    brand: product.brand || "",
+    saleStatus: product.salesStatus || "",
+    category: product.category?.title || "여성의류",
+    options: [],
+    imageUrl: product.imageUrl || product.thumbnailUrl || "",
+    discovered: true,
+  };
+  if (!openaiApiKey) {
+    base.options = [{ label: "컬러미상,FREE", code: "", colorCode: "", codeRequired: true, message: "옵션코드를 입력해 주세요", inferred: true, confidence: "low" }];
+    base.analysisNote = "GPT 연결 후 상세 이미지의 컬러·사이즈를 자동 분석할 수 있습니다.";
+    return base;
+  }
+
+  const detail = await collectDetailContent(product);
+  if (verifiedProductOptions[productId]) {
+    base.options = verifiedProductOptions[productId].map(({ color, colorCode, size }) => {
+      const codeInfo = optionCodeInfo(base.sellerCode, color, size, colorCode);
+      return {
+        label: `${color},${size}`,
+        code: codeInfo.code,
+        colorCode: codeInfo.colorCode,
+        codeRequired: codeInfo.codeRequired,
+        message: codeInfo.message,
+        inferred: false,
+        confidence: "verified",
+      };
+    });
+    base.analysisNote = "판매 옵션 검증값 적용";
+    base.detailText = detail.detailText;
+    return base;
+  }
+
+  const optionAnalysisImages = [...new Set([
+    ...detail.imageUrls.slice(0, 6),
+    ...detail.imageUrls.slice(-8),
+  ])].slice(0, 12);
+  const content = [{
+    type: "input_text",
+    text: `상품명: ${base.productName}\n카테고리: ${base.category}\n판매자 상품 코드: ${base.sellerCode}\n상세페이지 텍스트: ${detail.detailText || "텍스트 없음"}\n상세설명 이미지의 제품정보 표나 컬러·사이즈 영역을 OCR로 정확히 읽으세요. 리뷰 특징은 'POINT', 'Comment', 번호형 핵심 설명, 소재 혼용률, 기능 설명 영역을 우선 읽어 상세페이지 순서대로 정리하세요. 예를 들어 레터링·배색·자수 디테일, 코튼/스판 혼용률, 신축성·부드러운 촉감·편안한 착용감·코디 활용 설명을 각각 별도 사실로 남기세요. 확실하지 않은 값은 추측하지 말고 confidence를 low로 표시하세요.`,
+  }, ...optionAnalysisImages.map((image_url) => ({ type: "input_image", image_url }))];
+  let analysis;
+  try {
+    analysis = await callOpenAI({
+    instructions: "당신은 한국 여성의류 쇼핑몰 상품 분석가입니다. 상세설명 이미지에 제품코드·컬러·사이즈 표가 있으면 그 표의 텍스트를 최우선 정답으로 사용하세요. 쉼표로 구분된 컬러는 각각 별도 옵션입니다. 상품명에 있는 멀티, 믹스, 배색, 스트라이프는 디자인 표현이며 실제 컬러 표에 그렇게 적혀 있지 않으면 컬러명으로 사용하지 마세요. 표가 없을 때만 모든 썸네일을 확인해 이미지별 판매 컬러를 추론합니다. 첫 이미지만 보고 나머지 컬러를 누락하지 마세요. 파란색 계열은 단순히 어둡다는 이유로 네이비라고 하지 말고 실제 블루와 네이비를 구분하세요. 각 컬러에는 사방넷 컬러코드표 기준 영문 colorCode를 지정하세요. 예: 그레이 GY, 그린 GN, 네이비 NY, 라이트그레이 LG, 레드 RD, 민트 MN, 바이올렛 VI, 베이지 BE, 브라운 BR, 블랙 BK, 블루 BL, 스카이블루 SB, 아이보리 IV, 옐로우 YE, 오렌지 OR, 오트밀 OT, 올리브 OL, 와인 WI, 차콜 CG, 카키 KH, 크림 CR, 핑크 PK, 화이트 WH. 표에 없는 컬러는 가장 가까운 컬러를 억지로 고르지 말고 실제 컬러명을 그대로 반환하세요. 리뷰 사실은 상세페이지의 POINT·Comment·번호형 특징·소재 혼용률 영역을 최우선으로 OCR하여 순서대로 정리하고, 서로 중복되는 문장은 합치세요.",
+    input: [{ role: "user", content }],
+    schemaName: "queenit_product_options",
+    timeoutMs: 90000,
+    schema: {
+      type: "object", additionalProperties: false,
+      properties: {
+        confidence: { type: "string", enum: ["high", "medium", "low"] },
+        options: { type: "array", minItems: 1, maxItems: 30, items: { type: "object", additionalProperties: false, properties: { color: { type: "string" }, colorCode: { type: "string", pattern: "^[A-Z]{2}$" }, size: { type: "string" } }, required: ["color", "colorCode", "size"] } },
+        reviewFacts: { type: "array", minItems: 3, maxItems: 10, items: { type: "string", minLength: 5, maxLength: 140 } },
+      },
+      required: ["confidence", "options", "reviewFacts"],
+    },
+    });
+  } catch (error) {
+    console.error("OpenAI product analysis fallback:", error?.message || error);
+    analysis = {
+      confidence: "low",
+      options: [{ color: "컬러미상", colorCode: "ET", size: "FREE" }],
+      reviewFacts: [`${base.productName}에 표현된 디자인 디테일`],
+    };
+  }
+  const resolvedOptions = verifiedProductOptions[productId] || analysis.options;
+  base.options = resolvedOptions.map(({ color, colorCode, size }) => {
+    const codeInfo = optionCodeInfo(base.sellerCode, color, size, colorCode);
+    return {
+      label: `${color},${size}`,
+      code: codeInfo.code,
+      colorCode: codeInfo.colorCode,
+      codeRequired: codeInfo.codeRequired,
+      message: codeInfo.message,
+      inferred: true,
+      confidence: verifiedProductOptions[productId] ? "verified" : analysis.confidence,
+    };
+  });
+  base.analysisNote = verifiedProductOptions[productId]
+    ? "판매 옵션 검증값 적용"
+    : `상세 이미지 AI 분석 · 신뢰도 ${analysis.confidence}`;
+  base.reviewFacts = cleanReviewFacts(analysis.reviewFacts, base.productName);
+  base.detailText = detail.detailText;
+  return base;
+}
+
+async function resolveProduct(productId) {
+  if (!products[productId]) return discoverProduct(productId);
+  const base = products[productId];
+  if (productPageCache.has(productId)) return { ...base, ...productPageCache.get(productId) };
+  try {
+    const response = await fetch(`https://web.queenit.kr/product/${encodeURIComponent(productId)}`, { headers: { "User-Agent": "Mozilla/5.0 QueenitReviewMaker/3.0" } });
+    const html = response.ok ? await response.text() : "";
+    const pageProduct = extractJsonObject(html, '"product":{"productId"');
+    if (!pageProduct?.productId) throw new Error("상세페이지 상품 정보를 찾지 못했습니다.");
+    const contents = extractJsonObject(html, '"contents":{"imageUrls"');
+    if (contents) pageProduct.contents = contents;
+    const enrichedBase = {
+      ...base,
+      imageUrl: pageProduct.imageUrl || pageProduct.thumbnailUrl || base.imageUrl || "",
+      category: pageProduct.category?.title || base.category || "여성의류",
+      brand: pageProduct.brand || base.brand || "",
+    };
+    const detailAnalysis = await analyzeReviewFacts(enrichedBase, pageProduct);
+    const extra = {
+      imageUrl: enrichedBase.imageUrl,
+      category: enrichedBase.category,
+      brand: enrichedBase.brand,
+      reviewFacts: detailAnalysis.reviewFacts,
+      detailText: detailAnalysis.detailText,
+      analysisNote: "상세페이지 전체 AI 분석 완료",
+    };
+    productPageCache.set(productId, extra);
+    return { ...base, ...extra };
+  } catch {
+    return base;
+  }
+}
+
+const pick = (items) => items[Math.floor(Math.random() * items.length)];
+const shuffle = (items) => [...items].sort(() => Math.random() - 0.5);
+
+function productType(name) {
+  if (/원피스/.test(name)) return "원피스";
+  if (/가디건/.test(name)) return "가디건";
+  if (/니트/.test(name)) return "니트";
+  if (/팬츠|바지/.test(name)) return "바지";
+  if (/블라우스|셔츠/.test(name)) return "블라우스";
+  if (/스커트/.test(name)) return "스커트";
+  return "상의";
+}
+
+function makeReviews(product, optionLabel, count = 5, preferences = {}) {
+  const facts = Array.isArray(product.reviewFacts) ? product.reviewFacts.map((fact) => String(fact).trim()).filter(Boolean) : [];
+  const detailTextFacts = [String(product.detailText || "").trim()].filter(Boolean);
+  const verifiedFacts = facts.length ? facts : (detailTextFacts.length ? detailTextFacts : [`상품명은 ${product.productName}`, `선택 옵션은 ${optionLabel}`]);
+  {
+    const requestedSentences = Math.min(5, Math.max(1, Number.parseInt(preferences.length, 10) || 1));
+    const starts = ["실제로 보니", "눈에 먼저 들어온 건", "입었을 때는", "전체적으로", "디테일을 보면"];
+    return Array.from({ length: count }, (_, index) => {
+      const selected = Array.from({ length: requestedSentences }, (__, sentenceIndex) => {
+        const fact = verifiedFacts[(index * requestedSentences + sentenceIndex) % verifiedFacts.length].replace(/[.!?]+$/u, "");
+        return `${sentenceIndex === 0 ? `${starts[index % starts.length]} ` : ""}${fact}.`;
+      });
+      return selected.join(" ");
+    });
+  }
+  const [color = "", size = ""] = optionLabel.split(",");
+  const type = productType(product.productName);
+  const colorPhrases = [
+    `색감이 튀지 않고 옷 분위기랑 잘 어울려요.`,
+    `화면에서 본 색감과 크게 다르지 않고 실제로 입으니 더 자연스럽네요.`,
+    `가지고 있는 하의랑 맞춰 입기 어렵지 않아서 손이 가네요.`,
+    `색 조합이 촌스럽지 않고 은근히 포인트가 돼서 마음에 들어요.`,
+    `전체 느낌이 차분해서 평소 옷들과 맞추기 괜찮아요.`,
+  ];
+  const fitByType = {
+    원피스: ["허리와 배 부분이 달라붙지 않아 편해요.", "길이도 부담스럽지 않고 움직일 때 편합니다.", "한 벌만 입어도 갖춰 입은 느낌이 나네요."],
+    가디건: ["팔과 몸통이 너무 끼지 않아 안에 받쳐 입기 좋아요.", "가볍게 걸치기 좋고 체형도 자연스럽게 가려줍니다.", "실내에서 입었다 벗기 편해서 손이 자주 갈 것 같아요."],
+    니트: ["니트인데 몸에 심하게 달라붙지 않아 편해요.", "팔뚝과 배 부분을 자연스럽게 가려줘서 마음에 듭니다.", "생각보다 가볍고 답답한 느낌이 덜해요."],
+    바지: ["허리와 배가 조이지 않아 오래 입어도 편해요.", "다리선이 너무 드러나지 않고 떨어지는 모양이 괜찮네요.", "앉았다 일어날 때도 불편하지 않아 자주 입을 것 같아요."],
+    블라우스: ["가슴과 팔 부분이 끼지 않아 편하게 잘 맞아요.", "단정하면서도 너무 딱딱해 보이지 않아 좋습니다.", "팔뚝을 적당히 가려주고 바지에 꺼내 입어도 괜찮아요."],
+    스커트: ["허리가 답답하지 않고 배 부분도 자연스럽게 정리돼 보여요.", "걷거나 앉을 때 불편하지 않고 길이도 마음에 듭니다.", "블라우스나 기본 티에 입기 좋아 활용도가 높아요."],
+    상의: ["몸에 딱 붙지 않고 적당히 여유가 있어 편해요.", "팔뚝과 배 부분을 자연스럽게 가려줘서 마음에 듭니다.", "길이가 너무 짧지 않아 바지 위로 편하게 입기 좋아요."],
+  };
+  const usage = [
+    "동네 모임이나 장 보러 갈 때 편하게 입기 좋겠어요.",
+    "청바지에도 잘 어울리고 외출할 때 자주 손이 갈 것 같아요.",
+    "꾸민 듯 안 꾸민 듯 보여서 평소에 입기 딱 좋네요.",
+    "검정 바지 하나만 받쳐 입어도 차려입은 느낌이 납니다.",
+    "여행이나 가족 모임에 입고 가도 괜찮을 것 같아요.",
+    "세탁 전이라 오래 입어보진 않았지만 첫인상은 만족스럽습니다.",
+  ];
+  const openings = [
+    `평소 ${size || "FREE"} 사이즈가 잘 맞을지 걱정했는데 받아보니 괜찮네요.`,
+    `${product.productName} 찾다가 색상이 마음에 들어 주문했어요.`,
+    `너무 젊어 보일까 망설였는데 막상 입어보니 생각보다 잘 어울려요.`,
+    `사진만 보고 주문해서 걱정했는데 직접 입어보니 더 마음에 듭니다.`,
+    `편하게 입을 옷이 필요해서 골랐는데 기대보다 괜찮네요.`,
+    `요즘 입을 옷이 마땅치 않았는데 오랜만에 마음에 드는 옷을 찾았어요.`,
+  ];
+  const materials = [
+    "소재가 무겁지 않고 피부에 닿는 느낌도 거슬리지 않아요.",
+    "생각보다 가볍고 하루 종일 입어도 답답하지 않네요.",
+    "천이 뻣뻣하지 않아 움직이기 편합니다.",
+    "소재와 마무리가 전반적으로 무난한 편이에요.",
+    "입었을 때 부해 보이지 않고 전체 모양이 자연스럽습니다.",
+  ];
+  const reviewType = preferences.reviewType || "핏감";
+  const focusPhrases = {
+    "핏감": [
+      "입어보니 몸에 달라붙지 않으면서도 전체 핏이 단정하게 떨어져요.",
+      "어깨와 품이 어색하게 뜨지 않아 입었을 때 모양이 괜찮네요.",
+      "너무 크거나 조이지 않고 적당히 여유 있는 핏이라 마음에 들어요.",
+      "옆에서 봐도 부해 보이지 않고 선이 자연스럽게 잡힙니다.",
+      "기장과 품의 균형이 잘 맞아서 편안하면서도 흐트러져 보이지 않아요.",
+    ],
+    "컬러감": [
+      `${color} 색상이 화면보다 튀지 않고 얼굴빛을 편안하게 살려줘요.`,
+      `${color} 컬러가 칙칙하지 않아 평소 입던 옷과 잘 어울립니다.`,
+      "실제로 보니 색감이 과하지 않고 은은해서 손이 자주 갈 것 같아요.",
+      "밝은 곳과 실내에서 봐도 색이 부담스럽지 않고 차분하네요.",
+      "기본 하의에 받쳐 입기 쉬운 색이라 코디하기 편합니다.",
+    ],
+    "착용감": [
+      "입었을 때 피부에 거슬리는 느낌이 없고 움직이기도 편해요.",
+      "오래 앉아 있어도 조이는 곳이 없어 착용감이 편안합니다.",
+      "옷이 무겁지 않고 팔을 움직일 때도 불편하지 않네요.",
+      "몸에 닿는 촉감이 무난하고 답답하지 않아 일상복으로 좋아요.",
+      "입고 벗기 편하고 활동할 때 당기는 부분이 없어 만족스럽습니다.",
+    ],
+    "체형커버": [
+      "배와 옆선이 그대로 드러나지 않아 체형을 자연스럽게 가려줘요.",
+      "팔과 상체에 적당한 여유가 있어 신경 쓰이던 부분이 덜 보여요.",
+      "몸선을 꽉 잡지 않고 자연스럽게 떨어져 한결 날씬해 보입니다.",
+      "허리 부분이 달라붙지 않아 편하면서도 체형이 정돈돼 보여요.",
+      "뒤쪽까지 기장이 안정적이라 부담 없이 입기 좋습니다.",
+    ],
+    "가성비": [
+      "소재와 전체 마무리가 기대한 수준이라 만족스러워요.",
+      "부담 없는 가격에 평소 자주 입을 수 있어 실용적입니다.",
+      "비슷한 옷과 비교해도 활용도가 높아 가격 대비 괜찮네요.",
+      "한철만 입을 느낌은 아니고 기본 옷으로 활용하기 좋아 보여요.",
+      "디자인과 착용감을 함께 보면 지불한 가격이 아깝지 않습니다.",
+    ],
+    "종합적": [
+      "색감이 부담스럽지 않고 핏도 편안해서 가격까지 생각하면 전체적으로 만족스러워요.",
+      "입었을 때 체형을 자연스럽게 가려주고 컬러도 코디하기 쉬워 활용도가 괜찮네요.",
+      "착용감과 핏이 편한 데다 디자인도 무난해서 평소 입기 좋은 옷이에요.",
+      "색상, 사이즈감, 소재 느낌이 한쪽으로 치우치지 않아 전반적으로 만족합니다.",
+      "편하게 입으면서 체형도 보완되고 가격 부담도 크지 않아 균형이 잘 맞아요.",
+    ],
+    "소재": [
+      "소재가 뻣뻣하지 않고 피부에 닿는 느낌이 부드러워 편하게 입기 좋아요.",
+      "원단이 무겁지 않고 적당히 유연해서 움직일 때도 부담스럽지 않네요.",
+      "두께감이 지나치게 두껍지 않아 답답하지 않고 일상에서 입기 괜찮아요.",
+      "천이 힘없이 축 늘어지지 않으면서도 몸에 자연스럽게 따라와요.",
+      "소재의 촉감과 무게감이 무난해서 오래 입고 있어도 거슬리지 않습니다.",
+    ],
+    "디테일": [
+      "앞쪽 프린팅이 과하게 튀지 않으면서 포인트가 되어 밋밋하지 않아요.",
+      "레터링 위치와 크기가 적당해서 부담 없이 포인트로 입기 좋네요.",
+      "자수 장식이 깔끔하게 들어가 있어 가까이서 봐도 단정한 느낌이에요.",
+      "넥라인과 소매, 밑단 마감이 디자인과 자연스럽게 어우러집니다.",
+      "배색과 장식 디테일이 옷의 분위기를 살려줘서 단독으로 입어도 괜찮아요.",
+    ],
+  };
+
+  const reviews = [];
+  const detailFacts = Array.isArray(product.reviewFacts) ? product.reviewFacts.filter(Boolean) : [];
+  const variantOffset = Math.max(0, (Number(preferences.variantIndex) || 1) - 1);
+  const requestedSentences = Math.min(5, Math.max(1, Number.parseInt(preferences.length, 10) || 1));
+  const isChat = preferences.tone === "채팅";
+  const chatEndings = ["ㅎㅎ", "ㅋㅋ", "ㅎㅎ^^", "^^", "ㅋㅋㅋ~"];
+  for (let i = 0; i < count; i += 1) {
+    const sentences = [
+      (focusPhrases[reviewType] || focusPhrases["핏감"])[(variantOffset + i) % 5],
+      detailFacts.length ? detailFacts[(variantOffset + i) % detailFacts.length] : openings[(variantOffset + i) % openings.length],
+      fitByType[type][(variantOffset + i) % fitByType[type].length],
+      materials[(variantOffset * 3 + i) % materials.length],
+      usage[(variantOffset * 2 + i) % usage.length],
+    ].slice(0, requestedSentences);
+    if (isChat) sentences[sentences.length - 1] += chatEndings[i % chatEndings.length];
+    reviews.push(sentences.join(" "));
+  }
+  return reviews;
+}
+
+function reviewMatchesType(review, reviewType) {
+  const patterns = {
+    "핏감": /핏|품|어깨|기장|달라붙|떨어지|여유|크거나|조이|실루엣/,
+    "컬러감": /색|컬러|배색|색감|얼굴빛|밝|차분|은은|코디/,
+    "착용감": /착용|편안|편하|촉감|피부|움직|활동|답답|무겁|가볍|입고 벗/,
+    "체형커버": /체형|커버|가려|날씬|몸선|배와|뱃살|옆선|팔뚝|허리|뒤쪽|부해 보이지/,
+    "가성비": /가격|가성비|가격 대비|부담 없|실용|활용도|아깝지|마무리|값/,
+    "소재": /소재|원단|천|촉감|두께|무게|가볍|부드|뻣뻣|신축|통기|유연|까슬/,
+    "디테일": /프린트|프린팅|자수|레터링|로고|엠블럼|단추|버튼|배색|넥라인|소매|밑단|마감|장식|포인트/,
+  };
+  if (reviewType === "종합적") {
+    const categoryPatterns = [
+      /핏|품|어깨|기장|실루엣/,
+      /색|컬러|배색|코디/,
+      /착용|편안|촉감|활동|답답/,
+      /체형|커버|가려|몸선|허리|부해/,
+      /가격|가성비|실용|활용도|부담/,
+    ];
+    return categoryPatterns.filter((pattern) => pattern.test(String(review || ""))).length >= 2;
+  }
+  return (patterns[reviewType] || /./).test(String(review || ""));
+}
+
+const forbiddenReviewPhrases = [
+  /목을 조이지 않아서/,
+  /기본형/,
+  /FREE라서/i,
+  /가성비 기준으로 보면/,
+  /가격\s*(을\s*)?생각하면/,
+  /46\s*[-~]\s*50대인 저도/,
+  /가성비로 보면/,
+  /체형커버가 되는 쪽으로 보면/,
+  /체형커버로 보니/,
+  /가성비를 따져보면/,
+  /목에 닿는 부분이 까슬하지 않아서/,
+  /소매가 손목까지 와서 팔 움직일 때 허전하지 않았고/,
+  /라운드넥 반팔 티셔츠 디자인이다/,
+  /핏감이 생각보다 여유 있어서/,
+  /44\s*[~～-]\s*55\s*사이즈/,
+  /허리선 아래로 떨어지는 짧은 길이라 답답하지 않고/,
+  /가성비를 먼저 따져보면/,
+  /보더\s*패턴/,
+  /둥글게 내려오는 밑단/,
+  /가성비를 먼저 보게 되(는데|는 옷인데)/,
+  /옵션인데도/,
+  /44\s*사이즈인 제게도/,
+  /(블랙|검정|화이트|아이보리|베이지|브라운|네이비|블루|그레이|차콜|핑크|그린|카키|와인|버건디|오렌지|레드|퍼플|옐로우|민트|소라|크림)\s*(이라도|인데도|인도게|인\s*덕에|라서|이라서|컬러라|색이라)/,
+  /안감이 없는 편이라/,
+  /안쪽이 따로 덧대어지지 않아/,
+  /목선이 둥글게 잡혀 있어서/,
+  /반팔이라 팔동작도 편하고/,
+  /어깨선도 과하게 드러나지 않아/,
+  /움직일 때 답답함이 적어서 단독으로 입어도 편했어요/,
+  /군더더기 없어 깔끔하게 떨어집니다/,
+];
+
+function hasForbiddenReviewPhrase(review) {
+  return forbiddenReviewPhrases.some((pattern) => pattern.test(String(review || "")));
+}
+
+function openingSignature(review) {
+  const firstSentence = String(review || "").split(/[.!?\n]/)[0];
+  return firstSentence.replace(/[^가-힣A-Za-z0-9]/g, "").slice(0, 10).toLowerCase();
+}
+
+function hasSimilarOpening(review, previousReviews) {
+  const signature = openingSignature(review);
+  if (signature.length < 6) return false;
+  return previousReviews.some((previous) => {
+    const previousSignature = openingSignature(previous);
+    return previousSignature.length >= 6 && (
+      signature.startsWith(previousSignature.slice(0, 7)) ||
+      previousSignature.startsWith(signature.slice(0, 7))
+    );
+  });
+}
+
+function limitReviewSentences(review, requestedSentences) {
+  const parts = String(review || "").trim().split(/\n+|(?<=[.!?])\s+/u).map((part) => part.trim()).filter(Boolean);
+  return parts.slice(0, Math.max(1, requestedSentences)).join(" ");
+}
+
+async function makeAiReviews(product, optionLabel, previousReviews = [], preferences = {}, count = 5) {
+  if (!openaiApiKey) return { reviews: makeReviews(product, optionLabel, count, preferences), source: "template" };
+  const recent = previousReviews.filter(Boolean).slice(-40);
+  const tone = preferences.tone || "간결하게";
+  const reviewNumber = Math.min(5, Math.max(1, Number(preferences.variantIndex) || 1));
+  const focusGuides = [
+    "상세페이지에서 확인된 소재, 조직감, 두께, 신축성 중 하나와 계절 착용감을 자연스럽게 연결하세요.",
+    "레터링, 자수, 프린팅, 배색, 러플, 스트라이프 등 실제로 확인되는 디자인 디테일과 옷의 분위기를 연결하세요.",
+    "길이, 품, 루즈핏, 소매, 넥라인 등 확인된 실루엣을 중심으로 편안함이나 체형 보완 느낌을 자연스럽게 말하세요. 상세정보에 없는 핏은 만들지 마세요.",
+    "단독 착용, 레이어드, 팬츠·스커트 매치, 데일리·여행·모임 등 상세페이지에서 뒷받침되는 코디 활용을 중심으로 말하세요.",
+    "앞 리뷰에서 사용하지 않은 특징을 골라 소재·디자인·활용성의 전체적인 만족감을 자연스럽게 정리하세요.",
+  ];
+  const orderedDetailFacts = Array.isArray(product.reviewFacts) ? product.reviewFacts.filter(Boolean) : [];
+  const focusPatterns = [
+    /소재|원단|코튼|면|스판|린넨|라미|니트|메쉬|우븐|신축|두께|촉감|통기|시원/,
+    /레터링|자수|프린트|프린팅|배색|러플|스트라이프|리본|장식|디테일|패턴|레이스/,
+    /핏|실루엣|기장|길이|품|루즈|박시|소매|넥|체형|라인|밴딩/,
+    /코디|활용|레이어드|단독|팬츠|스커트|데일리|여행|휴양|모임|외출|가디건/,
+    /./,
+  ];
+  const primaryDetailFact = orderedDetailFacts.find((fact) => focusPatterns[reviewNumber - 1].test(fact))
+    || (orderedDetailFacts.length ? orderedDetailFacts[(reviewNumber - 1) % orderedDetailFacts.length] : "");
+  const reviewLength = preferences.length || "1문장";
+  const requestedSentences = Math.min(5, Math.max(1, Number.parseInt(reviewLength, 10) || 1));
+  const chatGuide = tone === "채팅"
+    ? `친한 사람과 인터넷 채팅하듯 편하게 쓰세요. 리뷰 번호에 따라 끝표현을 다르게 사용하세요: 1번 ㅎㅎ, 2번 ㅋㅋ, 3번 ㅎㅎ^^, 4번 ^^, 5번 ㅋㅋㅋ~. 같은 표현만 반복하지 말고 문맥에 맞게 한 번 정도만 자연스럽게 사용하세요.`
+    : tone === "간결하게"
+      ? "핵심 특징만 짧고 명확하게 쓰세요. 장황한 도입, 자기소개, 조건을 따지는 표현은 빼고 각 문장을 15~35자 안팎으로 간결하게 작성하세요."
+      : "선택한 말투에 맞춰 자연스럽게 작성하세요.";
+  const sequentialDiversityGuide = [
+    "리뷰를 배열 순서대로 1번부터 작성하세요.",
+    "2번부터는 바로 앞 번호까지 이미 작성한 모든 리뷰를 먼저 비교한 뒤 작성하세요.",
+    "앞 리뷰와 첫 문장, 중심 소재, 상품 특징, 장점, 문장 구조, 어미가 겹치면 다른 사실과 관점으로 다시 작성하세요.",
+    "다섯 리뷰는 각각 상세페이지의 서로 다른 특징을 중심으로 작성하세요.",
+    "같은 칭찬이나 결론을 단어만 바꿔 반복하지 마세요. 앞 리뷰를 요약하거나 재진술하는 것도 금지합니다.",
+  ].join("\n");
+  const queenitBestReviewStyleGuide = [
+    "퀸잇 카테고리 인기 상품의 실제 후기에서 분석한 말투를 참고하세요. 원문 문장은 복사하지 마세요.",
+    "대부분 한두 가지 포인트만 짧게 말합니다. 모든 장점을 한 리뷰에 몰아넣지 마세요.",
+    "색상, 길이, 허리, 품, 신축성, 두께, 소재처럼 구매자가 바로 느끼는 구체적인 요소를 우선하세요.",
+    "'마음에 들어요', '편해요', '잘 입을 것 같아요'처럼 평범한 생활 어미를 쓰되 다섯 리뷰에서 같은 어미를 반복하지 마세요.",
+    "모든 리뷰를 완벽한 광고 문장처럼 다듬지 말고, 짧고 편안한 구어체 리듬을 유지하세요.",
+    "과도한 칭찬보다 한 가지 만족 이유를 구체적으로 말하세요. 상세정보로 뒷받침될 때는 아쉬운 점이나 개인차도 담담하게 표현할 수 있습니다.",
+    "채팅 말투가 선택된 경우에만 ~, ^^, ㅎㅎ, ㅋㅋ 등을 한 리뷰에 한 번 이하로 자연스럽게 섞으세요.",
+    "배송 인사, 판매자 응원, 아무 상품에나 붙일 수 있는 내용은 사용하지 마세요.",
+  ].join("\n");
+  const sharedSellerReviewStyleGuide = [
+    "사용자가 제공한 우수 판매자 리뷰 예시의 구조와 말투를 따르되 예시 문장을 그대로 복사하지 마세요.",
+    "다섯 리뷰의 역할은 1번 소재와 계절감, 2번 디자인 디테일과 분위기, 3번 핏과 편안함, 4번 코디와 활용성, 5번 전체적인 만족감입니다.",
+    "각 리뷰는 상세페이지 POINT 한두 개만 선택해 실제로 입어 본 느낌처럼 자연스럽게 풀어 쓰세요.",
+    "친근하고 정돈된 판매자 후기 말투를 사용하고, 기본 어미는 '~예요', '~좋아요', '~마음에 들어요', '~같아요'를 상황에 맞게 번갈아 사용하세요.",
+    "같은 문장 시작, 같은 장점, 같은 코디, 같은 종결어미를 다섯 리뷰에서 반복하지 마세요.",
+    "1문장 설정이면 핵심 특징과 착용 느낌을 두 절로 연결한 한 문장만 쓰고, 2~3문장 설정이면 특징 설명과 착용·코디 느낌을 나누어 쓰세요.",
+    "'소장 가치', '완성도', '무드 완성', '스타일이 살아나요' 같은 판매 문구를 매 리뷰마다 반복하지 말고 꼭 어울릴 때만 사용하세요.",
+    "상세페이지에서 확인되지 않은 통기성, 신축성, 체형 커버, 계절감, 비침, 촉감은 임의로 추가하지 마세요.",
+  ].join("\n");
+  let result;
+  try {
+    result = await callOpenAI({
+    instructions: [
+      "당신은 40~50대 한국 여성 고객의 자연스러운 쇼핑 후기 작성자입니다.",
+      "제공된 상세정보를 사실의 기준으로 삼되, 정보를 설명하거나 요약하지 말고 실제로 받아서 입어 본 사람이 남기는 후기처럼 풀어 쓰세요.",
+      "확인된 색상, 디자인, 소재, 길이, 핏 정보를 바탕으로 한 일상적인 느낌과 코디 의견은 자연스럽게 표현해도 됩니다. 다만 상세정보와 모순되는 내용이나 새로운 기능·수치는 만들지 마세요.",
+      "상품명 전체, '상세페이지', '확인된 특징', '분석', '옵션' 같은 판매자·시스템 표현은 리뷰에 쓰지 마세요.",
+      "40~50대라는 나이를 직접 밝히지 말고, 지나치게 젊은 유행어나 과장된 감탄도 피하세요.",
+      "짧은 리뷰라도 구체적인 상품 특징과 실제로 입었을 때의 느낌을 한 문장 안에서 자연스럽게 연결하세요.",
+      `이번 ${reviewNumber}번 리뷰 방향: ${focusGuides[reviewNumber - 1]} 해당 내용이 상세정보에 없으면 확인되는 다른 특징을 사용하세요.`,
+      primaryDetailFact ? `이번 리뷰의 최우선 근거는 상세페이지에서 추출한 다음 내용입니다: ${primaryDetailFact} 이 문장을 그대로 복사하지 말고 실제 사용자의 느낌으로 풀어 쓰세요.` : "상세페이지에서 확인되는 구체적인 특징 하나를 중심으로 쓰세요.",
+      "서로 다른 사람이 쓴 것처럼 말투, 문장 길이, 관심 포인트를 확실히 다르게 하세요.",
+      "광고 문구나 지나친 칭찬을 피하고 일상적인 표현을 사용하세요.",
+      "직접 확인할 수 없는 세탁 결과, 배송 속도, 내구성은 단정하지 마세요.",
+      "이전에 생성한 리뷰와 문장 구조나 핵심 표현이 겹치지 않게 하세요.",
+      "상품정보 문장을 그대로 복사하거나 명사만 나열하지 말고 실제 후기 말투로 바꾸세요.",
+      "다음 표현은 사용하지 마세요: 목을 조이지 않아서, 기본형, FREE라서, 가성비 기준으로 보면, 가격 생각하면, 가격을 생각하면, 46-50대인 저도, 가성비로 보면, 체형커버가 되는 쪽으로 보면, 체형커버로 보니, 가성비를 따져보면, 목에 닿는 부분이 까슬하지 않아서, 소매가 손목까지 와서 팔 움직일 때 허전하지 않았고, 라운드넥 반팔 티셔츠 디자인이다, 핏감이 생각보다 여유 있어서, 44~55 사이즈, 허리선 아래로 떨어지는 짧은 길이라 답답하지 않고, 가성비를 먼저 따져보면, 보더패턴, 둥글게 내려오는 밑단, 가성비를 먼저 보게 되는데, 가성비를 먼저 보게 되는 옷인데, 옵션인데도, 44사이즈인 제게도, 안감이 없는 편이라, 목선이 둥글게 잡혀 있어서, 반팔이라 팔동작도 편하고, 어깨선도 과하게 드러나지 않아, 안쪽이 따로 덧대어지지 않아, 움직일 때 답답함이 적어서 단독으로 입어도 편했어요, 군더더기 없어 깔끔하게 떨어집니다.",
+      "선택한 컬러명을 문장 앞에 붙여 '블랙이라도', '블랙인데도', '블랙인도게', '블랙 컬러라' 같은 식으로 이유를 만들지 마세요. 컬러를 말해야 할 때도 색상명보다 '색감', '배색', '톤'처럼 자연스러운 표현을 사용하세요.",
+      "같은 상품의 앞 리뷰와 첫 문장의 시작 단어나 도입 방식이 비슷하면 완전히 다른 상황이나 표현으로 시작하세요.",
+      sharedSellerReviewStyleGuide,
+      queenitBestReviewStyleGuide,
+      sequentialDiversityGuide,
+      chatGuide,
+      `각 리뷰는 반드시 정확히 ${requestedSentences}개의 완전한 문장으로 작성하세요. 문장 수를 임의로 늘리거나 줄이지 말고, 불필요한 줄바꿈은 사용하지 마세요.`,
+    ].join("\n"),
+    input: `상품명: ${product.productName}\n카테고리: ${product.category || productType(product.productName)}\n선택한 색상·사이즈: ${optionLabel}\n브랜드: ${product.brand || ""}\n상세페이지 POINT·Comment·소재표에서 확인된 특징(표시 순서):\n${orderedDetailFacts.length ? orderedDetailFacts.map((fact, index) => `${index + 1}. ${fact}`).join("\n") : (product.detailText || "확인된 추가 특징 없음")}\n이번 리뷰의 우선 근거: ${primaryDetailFact || "위 특징 중 앞 리뷰에서 쓰지 않은 내용"}\n작성자 성별: ${preferences.gender || "여성"}\n연령대: ${preferences.age || "41~45"}\n말투: ${tone}\n리뷰 번호: ${reviewNumber}/5\n리뷰 길이: 정확히 ${requestedSentences}문장\n추가 명령: ${preferences.command || "없음"}\n\n앞 번호까지 생성된 리뷰(반복 금지):\n${recent.length ? recent.map((v, i) => `${i + 1}. ${v}`).join("\n") : "없음"}\n\n광고 문구를 피하고 실제 구매자가 편하게 쓴 후기 말투로 작성하세요. 앞 리뷰와 소재·첫 문장·핵심 장점·말투가 겹치면 다른 관점으로 바꾸세요.`,
+    schemaName: "queenit_reviews",
+    schema: {
+      type: "object", additionalProperties: false,
+      properties: { reviews: { type: "array", minItems: count, maxItems: count, items: { type: "string", minLength: 15, maxLength: 320 } } },
+      required: ["reviews"],
+    },
+    });
+    rateLimitResetAt = null;
+  } catch (error) {
+    if (/rate limit|quota|requests per day|too many requests/i.test(error?.message || "")) {
+      rateLimitResetAt = rateLimitResetFromMessage(error.message) || rateLimitResetAt;
+      return { reviews: makeReviews(product, optionLabel, count, preferences), source: "template-rate-limit" };
+    }
+    console.error("OpenAI review generation fallback:", error?.message || error);
+    return { reviews: makeReviews(product, optionLabel, count, preferences), source: "template-api-error" };
+  }
+  const typeSafeFallbacks = makeReviews(product, optionLabel, count, preferences);
+  let reviews = result.reviews.map((review, index) => {
+    const earlierReviews = [...recent, ...result.reviews.slice(0, index)];
+    const valid = !hasForbiddenReviewPhrase(review)
+      && !hasSimilarOpening(review, earlierReviews);
+    return limitReviewSentences(valid ? review : typeSafeFallbacks[index], requestedSentences);
+  });
+  if (tone === "채팅") {
+    const chatEndings = ["ㅎㅎ", "ㅋㅋ", "ㅎㅎ^^", "^^", "ㅋㅋㅋ~"];
+    const startIndex = Math.max(0, (Number(preferences.variantIndex) || 1) - 1);
+    reviews = reviews.map((review, index) => {
+      const ending = chatEndings[(startIndex + index) % chatEndings.length];
+      const cleaned = String(review).trimEnd().replace(/(?:ㅎㅎ+|ㅋㅋ+|\^\^|[~!])+\s*$/u, "").trimEnd();
+      return `${cleaned} ${ending}`;
+    });
+  }
+  return { reviews, source: "openai" };
+}
+
+function json(res, status, value) {
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify(value));
+}
+
+async function readJson(req, maxLength = 1_000_000) {
+  let raw = "";
+  for await (const chunk of req) {
+    raw += chunk;
+    if (raw.length > maxLength) throw new Error("요청이 너무 큽니다.");
+  }
+  return raw ? JSON.parse(raw) : {};
+}
+
+async function createWorkbook(entries) {
+  const ExcelJSImport = await import("exceljs");
+  const ExcelJS = ExcelJSImport.default || ExcelJSImport;
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.readFile(path.join(root, "assets", "review-template.xlsx"));
+  const sheet = workbook.getWorksheet("Sheet1") || workbook.worksheets[0];
+  if (!sheet) throw new Error("엑셀 템플릿의 Sheet1 시트를 찾지 못했습니다.");
+
+  const optionImageCounts = new Map();
+  const preparedRows = [];
+  for (const entry of entries) {
+    for (const review of entry.reviews) {
+      const countKey = `${entry.productId}:${entry.optionCode}`;
+      const imageNumber = (optionImageCounts.get(countKey) || 0) + 1;
+      optionImageCounts.set(countKey, imageNumber);
+      const imageFileName = `${entry.optionCode}_${imageNumber}.jpg`;
+      const imageSrc = `${reviewImageBaseUrl}/${imageFileName}`;
+      preparedRows.push({
+        imageSrc,
+        values: [
+        entry.productId,
+        entry.optionCode,
+        review,
+        null,
+        null, null, null, null, null, null, null,
+        ],
+        imageFileName,
+      });
+    }
+  }
+  const uniqueImageUrls = [...new Set(preparedRows.map((row) => row.imageSrc).filter(Boolean))];
+  const imageAvailability = new Map(await Promise.all(
+    uniqueImageUrls.map(async (url) => [url, await isReachableImage(url)]),
+  ));
+  const rows = preparedRows.map(({ imageSrc, values }) => {
+    if (imageAvailability.get(imageSrc)) {
+      values[3] = imageSrc;
+    }
+    return values;
+  });
+  const thinBorder = { style: "thin", color: { argb: "FFB7B7B7" } };
+  rows.forEach((values, index) => {
+    const row = sheet.getRow(6 + index);
+    row.values = values;
+    row.height = 135;
+    for (let column = 1; column <= 11; column += 1) {
+      const cell = row.getCell(column);
+      cell.font = { name: "Arial", size: 9, color: { argb: "FF000000" } };
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFFFFF" } };
+      cell.border = { top: thinBorder, left: thinBorder, bottom: thinBorder, right: thinBorder };
+      cell.alignment = {
+        horizontal: column <= 3 ? "left" : "center",
+        vertical: "top",
+        wrapText: true,
+      };
+    }
+    row.commit();
+  });
+  const output = await workbook.xlsx.writeBuffer();
+  return Buffer.from(output);
+}
+
+const server = http.createServer(async (req, res) => {
+  try {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    if (req.method === "GET" && url.pathname === "/api/status") {
+      if (rateLimitResetAt && rateLimitResetAt <= Date.now()) rateLimitResetAt = null;
+      return json(res, 200, { aiConnected: Boolean(openaiApiKey), model: openaiApiKey ? openaiModel : null, rateLimitResetAt });
+    }
+    if (req.method === "GET" && url.pathname === "/api/image-proxy") {
+      const source = String(url.searchParams.get("url") || "");
+      if (!allowedProductImages.has(source)) return json(res, 403, { message: "허용되지 않은 상품 이미지입니다." });
+      const response = await fetch(source, { headers: { "User-Agent": "Mozilla/5.0 QueenitReviewMaker/3.0" } });
+      const contentType = response.headers.get("content-type") || "";
+      if (!response.ok || !contentType.startsWith("image/")) return json(res, 404, { message: "상품 이미지를 불러오지 못했습니다." });
+      const buffer = Buffer.from(await response.arrayBuffer());
+      res.writeHead(200, { "Content-Type": contentType, "Content-Length": buffer.length, "Cache-Control": "public, max-age=3600" });
+      return res.end(buffer);
+    }
+    if (req.method === "POST" && url.pathname === "/api/config") {
+      const body = await readJson(req);
+      const apiKey = String(body.apiKey || "").trim();
+      if (!apiKey.startsWith("sk-") || apiKey.length < 20) return json(res, 400, { message: "올바른 OpenAI API 키를 입력해 주세요." });
+      openaiApiKey = apiKey;
+      return json(res, 200, { aiConnected: true, model: openaiModel });
+    }
+    if (req.method === "GET" && url.pathname === "/api/product") {
+      const id = (url.searchParams.get("id") || "").trim();
+      const product = await resolveProduct(id);
+      if (product.imageUrl) allowedProductImages.add(product.imageUrl);
+      return json(res, 200, product);
+    }
+    if (req.method === "POST" && url.pathname === "/api/products") {
+      const body = await readJson(req);
+      const ids = [...new Set((body.productIds || []).map((id) => String(id).trim()).filter(Boolean))].slice(0, 20);
+      if (!ids.length) return json(res, 400, { message: "상품 ID를 한 개 이상 입력해 주세요." });
+      const results = [];
+      for (const id of ids) {
+        try {
+          const product = await resolveProduct(id);
+          if (product.imageUrl) allowedProductImages.add(product.imageUrl);
+          results.push({ ok: true, product });
+        }
+        catch (error) { results.push({ ok: false, productId: id, message: error.message }); }
+      }
+      return json(res, 200, { results });
+    }
+    if (req.method === "POST" && url.pathname === "/api/generate") {
+      const body = await readJson(req);
+      const product = await resolveProduct(String(body.productId || "").trim());
+      if (product.imageUrl) allowedProductImages.add(product.imageUrl);
+      const option = product.options.find((item) => item.code === body.optionCode) || product.options[0];
+      const optionLabel = String(body.optionLabel || "").trim() || option.label;
+      const count = Math.max(1, Math.min(5, Number(body.count) || 5));
+      const generated = await makeAiReviews(product, optionLabel, Array.isArray(body.previousReviews) ? body.previousReviews : [], body.preferences || {}, count);
+      return json(res, 200, { product, option, reviews: generated.reviews, source: generated.source, rateLimitResetAt });
+    }
+    if (req.method === "POST" && url.pathname === "/api/download") {
+      const body = await readJson(req);
+      const entries = Array.isArray(body.entries) ? body.entries.map((entry) => ({
+        productId: String(entry.productId || "").trim(),
+        optionCode: String(entry.optionCode || "").trim(),
+        reviews: Array.isArray(entry.reviews) ? entry.reviews.map((v) => String(v).trim()).filter(Boolean) : [],
+        imageUrls: Array.isArray(entry.imageUrls) ? entry.imageUrls.map(normalizeImageUrl).filter(Boolean).slice(0, 3) : [],
+      })).filter((entry) => entry.productId && entry.optionCode && entry.reviews.length) : [];
+      if (!entries.length) return json(res, 400, { message: "상품, 옵션, 리뷰를 확인해 주세요." });
+      const buffer = await createWorkbook(entries);
+      res.writeHead(200, {
+        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Content-Disposition": 'attachment; filename="queenit_seller_reviews.xlsx"',
+        "Content-Length": buffer.length,
+      });
+      return res.end(buffer);
+    }
+    if (req.method === "POST" && url.pathname === "/api/images/zip") {
+      const body = await readJson(req, 80_000_000);
+      const files = Array.isArray(body.files) ? body.files.slice(0, 100) : [];
+      if (!files.length) return json(res, 400, { message: "다운로드할 매칭 이미지가 없습니다." });
+      const AdmZipImport = await import("adm-zip");
+      const AdmZip = AdmZipImport.default || AdmZipImport;
+      const zip = new AdmZip();
+      for (const file of files) {
+        const name = String(file.name || "").replace(/[^A-Za-z0-9_.-]/g, "");
+        const match = String(file.dataUrl || "").match(/^data:image\/(?:jpeg|png|webp);base64,(.+)$/i);
+        if (name && match) zip.addFile(name, Buffer.from(match[1], "base64"));
+      }
+      const buffer = zip.toBuffer();
+      res.writeHead(200, {
+        "Content-Type": "application/zip",
+        "Content-Disposition": 'attachment; filename="queenit_matched_images.zip"',
+        "Content-Length": buffer.length,
+      });
+      return res.end(buffer);
+    }
+
+    const requestPath = url.pathname === "/" ? "/index.html" : url.pathname;
+    const safePath = path.normalize(requestPath).replace(/^(\.\.[/\\])+/, "");
+    const filePath = path.join(publicDir, safePath);
+    if (!filePath.startsWith(publicDir)) return json(res, 403, { message: "접근할 수 없습니다." });
+    const ext = path.extname(filePath);
+    const mime = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml" }[ext] || "application/octet-stream";
+    const file = await fs.readFile(filePath);
+    res.writeHead(200, { "Content-Type": mime, "Cache-Control": "no-store, max-age=0" });
+    res.end(file);
+  } catch (error) {
+    if (error?.code === "ENOENT") return json(res, 404, { message: "페이지를 찾지 못했습니다." });
+    console.error(error);
+    json(res, 500, { message: error?.message || "처리 중 문제가 생겼습니다. 잠시 후 다시 시도해 주세요." });
+  }
+});
+
+server.listen(port, "0.0.0.0", () => {
+  console.log(`퀸잇 리뷰 메이커가 http://127.0.0.1:${port} 에서 실행 중입니다.`);
+});

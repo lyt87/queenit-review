@@ -1,0 +1,94 @@
+[
+  {
+    "code": "GY",
+    "name": "그레이"
+  },
+  {
+    "code": "GN",
+    "name": "그린"
+  },
+  {
+    "code": "NY",
+    "name": "네이비"
+  },
+  {
+    "code": "LG",
+    "name": "라이트그레이"
+  },
+  {
+    "code": "RD",
+    "name": "레드"
+  },
+  {
+    "code": "MN",
+    "name": "민트"
+  },
+  {
+    "code": "VI",
+    "name": "바이올렛"
+  },
+  {
+    "code": "BE",
+    "name": "베이지"
+  },
+  {
+    "code": "BR",
+    "name": "브라운"
+  },
+  {
+    "code": "BK",
+    "name": "블랙"
+  },
+  {
+    "code": "BL",
+    "name": "블루"
+  },
+  {
+    "code": "SB",
+    "name": "스카이블루"
+  },
+  {
+    "code": "IV",
+    "name": "아이보리"
+  },
+  {
+    "code": "YE",
+    "name": "옐로우"
+  },
+  {
+    "code": "OR",
+    "name": "오렌지"
+  },
+  {
+    "code": "OT",
+    "name": "오트밀"
+  },
+  {
+    "code": "OL",
+    "name": "올리브"
+  },
+  {
+    "code": "WI",
+    "name": "와인"
+  },
+  {
+    "code": "CG",
+    "name": "차콜"
+  },
+  {
+    "code": "KH",
+    "name": "카키"
+  },
+  {
+    "code": "CR",
+    "name": "크림"
+  },
+  {
+    "code": "PK",
+    "name": "핑크"
+  },
+  {
+    "code": "WH",
+    "name": "화이트"
+  }
+]
