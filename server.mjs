@@ -9,6 +9,12 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(root, "public");
 const productsPayload = JSON.parse(await fs.readFile(path.join(root, "data", "options.json"), "utf8"));
 const products = productsPayload.products;
+let sabangColorRows = [];
+try {
+  sabangColorRows = JSON.parse(await fs.readFile(path.join(root, "data", "color-codes.json"), "utf8"));
+} catch {
+  sabangColorRows = [];
+}
 const productPageCache = new Map();
 const allowedProductImages = new Set();
 const port = Number(process.env.PORT || 4173);
@@ -24,40 +30,34 @@ function rateLimitResetFromMessage(message = "") {
   return milliseconds > 0 ? Date.now() + milliseconds : null;
 }
 
-const colorCodes = {
-  블랙: "BK", 화이트: "WH", 아이보리: "IV", 베이지: "BE", 브라운: "BR",
-  네이비: "NY", 그레이: "GY", 차콜: "CG", 핑크: "PK", 블루: "BL",
-  그린: "GN", 카키: "KH", 와인: "WI", 오렌지: "OR", 레드: "RE",
-  퍼플: "PP", 옐로우: "YE", 민트: "MT", 소라: "SB", 크림: "CR",
-};
+function normalizeColorName(value = "") {
+  return String(value || "").replace(/[\s_\-/()[\]{}·,]/g, "").toLowerCase();
+}
+
+const colorCodes = Object.fromEntries(
+  sabangColorRows
+    .filter((row) => row?.code && row?.name)
+    .map((row) => [String(row.name).trim(), String(row.code).trim().toUpperCase()])
+);
 const colorAliases = [
-  { code: "LB", names: ["라이트블루", "연청", "연파랑"] },
-  { code: "DB", names: ["다크블루", "진청", "진파랑"] },
-  { code: "SB", names: ["스카이블루", "소라"] },
-  { code: "MG", names: ["멜란지그레이", "멜란지"] },
-  { code: "BG", names: ["버건디"] },
-  { code: "OM", names: ["오트밀"] },
-  { code: "IV", names: ["아이보리", "오프화이트"] },
-  { code: "BK", names: ["블랙", "검정", "검은색"] },
-  { code: "WH", names: ["화이트", "흰색", "백색"] },
-  { code: "BE", names: ["베이지"] },
-  { code: "BR", names: ["브라운", "갈색"] },
-  { code: "NY", names: ["네이비", "남색"] },
-  { code: "CG", names: ["차콜"] },
-  { code: "GY", names: ["그레이", "회색"] },
-  { code: "PK", names: ["핑크", "분홍"] },
-  { code: "BL", names: ["블루", "파랑", "청색"] },
-  { code: "GN", names: ["그린", "초록"] },
-  { code: "KH", names: ["카키"] },
-  { code: "WI", names: ["와인"] },
-  { code: "OR", names: ["오렌지", "주황"] },
-  { code: "RE", names: ["레드", "빨강", "적색"] },
-  { code: "PP", names: ["퍼플", "보라"] },
-  { code: "YE", names: ["옐로우", "노랑"] },
-  { code: "MT", names: ["민트"] },
-  { code: "CR", names: ["크림"] },
-  { code: "MX", names: ["멀티컬러"] },
-];
+  ...sabangColorRows
+    .filter((row) => row?.code && row?.name)
+    .map((row) => ({ code: String(row.code).trim().toUpperCase(), names: [String(row.name).trim()] })),
+  { code: colorCodes["블랙"], names: ["검정", "검은색"] },
+  { code: colorCodes["화이트"], names: ["흰색", "백색"] },
+  { code: colorCodes["네이비"], names: ["남색"] },
+  { code: colorCodes["그레이"], names: ["회색"] },
+  { code: colorCodes["핑크"], names: ["분홍"] },
+  { code: colorCodes["블루"], names: ["파랑", "청색"] },
+  { code: colorCodes["그린"], names: ["초록"] },
+  { code: colorCodes["브라운"], names: ["갈색"] },
+  { code: colorCodes["레드"], names: ["빨강", "적색"] },
+  { code: colorCodes["오렌지"], names: ["주황"] },
+  { code: colorCodes["옐로우"], names: ["노랑"] },
+  { code: colorCodes["스카이블루"], names: ["소라"] },
+  { code: colorCodes["바이올렛"], names: ["퍼플", "보라"] },
+  { code: colorCodes["아이보리"], names: ["오프화이트"] },
+].filter((entry) => entry.code);
 const sizeCodes = { FREE: "FF", 프리: "FF", 원사이즈: "FF", ONESIZE: "FF", "ONE SIZE": "FF", ONE: "FF", F: "FF", S: "S", M: "M", L: "L", XL: "XL", XXL: "XXL" };
 const verifiedProductOptions = {
   e2af82261a046cbd1a488407f924fcb1: [
@@ -239,16 +239,27 @@ async function analyzeReviewFacts(base, pageProduct) {
   return { reviewFacts: cleanReviewFacts(result.reviewFacts, base.productName), detailText: detail.detailText };
 }
 
-function optionCode(sellerCode, color, size, analyzedColorCode = "") {
+function optionCodeInfo(sellerCode, color, size, analyzedColorCode = "") {
   const normalizedSize = String(size || "FREE").toUpperCase();
-  const normalizedColor = String(color || "").replace(/[\s_\-/()[\]]/g, "").toLowerCase();
-  const aliasCode = colorAliases.find((entry) => entry.names.some((name) => normalizedColor.includes(name)))?.code;
+  const normalizedColor = normalizeColorName(color);
+  const exactCode = sabangColorRows.find((row) => normalizeColorName(row?.name) === normalizedColor)?.code;
+  const aliasCode = exactCode || [...colorAliases]
+    .sort((a, b) => Math.max(...b.names.map((name) => normalizeColorName(name).length)) - Math.max(...a.names.map((name) => normalizeColorName(name).length)))
+    .find((entry) => entry.names.some((name) => normalizedColor.includes(normalizeColorName(name))))?.code;
+  const knownCodes = new Set(sabangColorRows.map((row) => String(row.code || "").trim().toUpperCase()).filter(Boolean));
   const explicitCode = /^[A-Z]{2}$/.test(String(analyzedColorCode || "").toUpperCase())
+    && knownCodes.has(String(analyzedColorCode).toUpperCase())
     ? String(analyzedColorCode).toUpperCase()
     : "";
-  const colorCode = aliasCode || colorCodes[color] || explicitCode || String(color || "").replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpperCase() || "ET";
+  const colorCode = aliasCode || colorCodes[color] || explicitCode;
   const sizeCode = sizeCodes[normalizedSize] || (/^\d+$/.test(normalizedSize) ? normalizedSize : normalizedSize);
-  return `${sellerCode}${colorCode}${sizeCode}`;
+  return {
+    code: colorCode ? `${sellerCode}${colorCode}${sizeCode}` : "",
+    colorCode: colorCode || "",
+    sizeCode,
+    codeRequired: !colorCode,
+    message: colorCode ? "" : "옵션코드를 입력해 주세요",
+  };
 }
 
 async function discoverProduct(productId) {
@@ -274,19 +285,25 @@ async function discoverProduct(productId) {
     discovered: true,
   };
   if (!openaiApiKey) {
-    base.options = [{ label: "컬러미상,FREE", code: `${base.sellerCode}ETFF`, inferred: true, confidence: "low" }];
+    base.options = [{ label: "컬러미상,FREE", code: "", colorCode: "", codeRequired: true, message: "옵션코드를 입력해 주세요", inferred: true, confidence: "low" }];
     base.analysisNote = "GPT 연결 후 상세 이미지의 컬러·사이즈를 자동 분석할 수 있습니다.";
     return base;
   }
 
   const detail = await collectDetailContent(product);
   if (verifiedProductOptions[productId]) {
-    base.options = verifiedProductOptions[productId].map(({ color, colorCode, size }) => ({
-      label: `${color},${size}`,
-      code: optionCode(base.sellerCode, color, size, colorCode),
-      inferred: false,
-      confidence: "verified",
-    }));
+    base.options = verifiedProductOptions[productId].map(({ color, colorCode, size }) => {
+      const codeInfo = optionCodeInfo(base.sellerCode, color, size, colorCode);
+      return {
+        label: `${color},${size}`,
+        code: codeInfo.code,
+        colorCode: codeInfo.colorCode,
+        codeRequired: codeInfo.codeRequired,
+        message: codeInfo.message,
+        inferred: false,
+        confidence: "verified",
+      };
+    });
     base.analysisNote = "판매 옵션 검증값 적용";
     base.detailText = detail.detailText;
     return base;
@@ -303,7 +320,7 @@ async function discoverProduct(productId) {
   let analysis;
   try {
     analysis = await callOpenAI({
-    instructions: "당신은 한국 여성의류 쇼핑몰 상품 분석가입니다. 상세설명 이미지에 제품코드·컬러·사이즈 표가 있으면 그 표의 텍스트를 최우선 정답으로 사용하세요. 쉼표로 구분된 컬러는 각각 별도 옵션입니다. 상품명에 있는 멀티, 믹스, 배색, 스트라이프는 디자인 표현이며 실제 컬러 표에 그렇게 적혀 있지 않으면 컬러명으로 사용하지 마세요. 표가 없을 때만 모든 썸네일을 확인해 이미지별 판매 컬러를 추론합니다. 첫 이미지만 보고 나머지 컬러를 누락하지 마세요. 파란색 계열은 단순히 어둡다는 이유로 네이비라고 하지 말고 실제 블루와 네이비를 구분하세요. 각 컬러에는 판매자 옵션코드에 사용할 표준 영문 2자리 colorCode도 지정하세요. 예: 블랙 BK, 화이트 WH, 아이보리 IV, 베이지 BE, 브라운 BR, 네이비 NY, 그레이 GY, 차콜 CG, 핑크 PK, 블루 BL, 라이트블루 LB, 소라 SB, 그린 GN, 카키 KH, 와인 WI, 버건디 BG, 오렌지 OR, 레드 RE, 퍼플 PP, 옐로우 YE, 민트 MT, 크림 CR, 멀티 MX. 리뷰 사실은 상세페이지의 POINT·Comment·번호형 특징·소재 혼용률 영역을 최우선으로 OCR하여 순서대로 정리하고, 서로 중복되는 문장은 합치세요.",
+    instructions: "당신은 한국 여성의류 쇼핑몰 상품 분석가입니다. 상세설명 이미지에 제품코드·컬러·사이즈 표가 있으면 그 표의 텍스트를 최우선 정답으로 사용하세요. 쉼표로 구분된 컬러는 각각 별도 옵션입니다. 상품명에 있는 멀티, 믹스, 배색, 스트라이프는 디자인 표현이며 실제 컬러 표에 그렇게 적혀 있지 않으면 컬러명으로 사용하지 마세요. 표가 없을 때만 모든 썸네일을 확인해 이미지별 판매 컬러를 추론합니다. 첫 이미지만 보고 나머지 컬러를 누락하지 마세요. 파란색 계열은 단순히 어둡다는 이유로 네이비라고 하지 말고 실제 블루와 네이비를 구분하세요. 각 컬러에는 사방넷 컬러코드표 기준 영문 colorCode를 지정하세요. 예: 그레이 GY, 그린 GN, 네이비 NY, 라이트그레이 LG, 레드 RD, 민트 MN, 바이올렛 VI, 베이지 BE, 브라운 BR, 블랙 BK, 블루 BL, 스카이블루 SB, 아이보리 IV, 옐로우 YE, 오렌지 OR, 오트밀 OT, 올리브 OL, 와인 WI, 차콜 CG, 카키 KH, 크림 CR, 핑크 PK, 화이트 WH. 표에 없는 컬러는 가장 가까운 컬러를 억지로 고르지 말고 실제 컬러명을 그대로 반환하세요. 리뷰 사실은 상세페이지의 POINT·Comment·번호형 특징·소재 혼용률 영역을 최우선으로 OCR하여 순서대로 정리하고, 서로 중복되는 문장은 합치세요.",
     input: [{ role: "user", content }],
     schemaName: "queenit_product_options",
     timeoutMs: 90000,
@@ -326,12 +343,18 @@ async function discoverProduct(productId) {
     };
   }
   const resolvedOptions = verifiedProductOptions[productId] || analysis.options;
-  base.options = resolvedOptions.map(({ color, colorCode, size }) => ({
-    label: `${color},${size}`,
-    code: optionCode(base.sellerCode, color, size, colorCode),
-    inferred: true,
-    confidence: verifiedProductOptions[productId] ? "verified" : analysis.confidence,
-  }));
+  base.options = resolvedOptions.map(({ color, colorCode, size }) => {
+    const codeInfo = optionCodeInfo(base.sellerCode, color, size, colorCode);
+    return {
+      label: `${color},${size}`,
+      code: codeInfo.code,
+      colorCode: codeInfo.colorCode,
+      codeRequired: codeInfo.codeRequired,
+      message: codeInfo.message,
+      inferred: true,
+      confidence: verifiedProductOptions[productId] ? "verified" : analysis.confidence,
+    };
+  });
   base.analysisNote = verifiedProductOptions[productId]
     ? "판매 옵션 검증값 적용"
     : `상세 이미지 AI 분석 · 신뢰도 ${analysis.confidence}`;
@@ -404,11 +427,11 @@ function makeReviews(product, optionLabel, count = 5, preferences = {}) {
   const [color = "", size = ""] = optionLabel.split(",");
   const type = productType(product.productName);
   const colorPhrases = [
-    `${color} 색상이 생각보다 과하지 않고 얼굴이 환해 보여요.`,
+    `색감이 튀지 않고 옷 분위기랑 잘 어울려요.`,
     `화면에서 본 색감과 크게 다르지 않고 실제로 입으니 더 자연스럽네요.`,
-    `${color} 컬러라 코디가 어려울까 했는데 흰색이나 검정 바지에 잘 어울려요.`,
+    `가지고 있는 하의랑 맞춰 입기 어렵지 않아서 손이 가네요.`,
     `색 조합이 촌스럽지 않고 은근히 포인트가 돼서 마음에 들어요.`,
-    `평소 어두운 옷만 입다가 골랐는데 얼굴빛이 밝아 보여 좋네요.`,
+    `전체 느낌이 차분해서 평소 옷들과 맞추기 괜찮아요.`,
   ];
   const fitByType = {
     원피스: ["허리와 배 부분이 달라붙지 않아 편해요.", "길이도 부담스럽지 않고 움직일 때 편합니다.", "한 벌만 입어도 갖춰 입은 느낌이 나네요."],
@@ -568,6 +591,14 @@ const forbiddenReviewPhrases = [
   /가성비를 먼저 보게 되(는데|는 옷인데)/,
   /옵션인데도/,
   /44\s*사이즈인 제게도/,
+  /(블랙|검정|화이트|아이보리|베이지|브라운|네이비|블루|그레이|차콜|핑크|그린|카키|와인|버건디|오렌지|레드|퍼플|옐로우|민트|소라|크림)\s*(이라도|인데도|인도게|인\s*덕에|라서|이라서|컬러라|색이라)/,
+  /안감이 없는 편이라/,
+  /안쪽이 따로 덧대어지지 않아/,
+  /목선이 둥글게 잡혀 있어서/,
+  /반팔이라 팔동작도 편하고/,
+  /어깨선도 과하게 드러나지 않아/,
+  /움직일 때 답답함이 적어서 단독으로 입어도 편했어요/,
+  /군더더기 없어 깔끔하게 떨어집니다/,
 ];
 
 function hasForbiddenReviewPhrase(review) {
@@ -669,7 +700,8 @@ async function makeAiReviews(product, optionLabel, previousReviews = [], prefere
       "직접 확인할 수 없는 세탁 결과, 배송 속도, 내구성은 단정하지 마세요.",
       "이전에 생성한 리뷰와 문장 구조나 핵심 표현이 겹치지 않게 하세요.",
       "상품정보 문장을 그대로 복사하거나 명사만 나열하지 말고 실제 후기 말투로 바꾸세요.",
-      "다음 표현은 사용하지 마세요: 목을 조이지 않아서, 기본형, FREE라서, 가성비 기준으로 보면, 가격 생각하면, 가격을 생각하면, 46-50대인 저도, 가성비로 보면, 체형커버가 되는 쪽으로 보면, 체형커버로 보니, 가성비를 따져보면, 목에 닿는 부분이 까슬하지 않아서, 소매가 손목까지 와서 팔 움직일 때 허전하지 않았고, 라운드넥 반팔 티셔츠 디자인이다, 핏감이 생각보다 여유 있어서, 44~55 사이즈, 허리선 아래로 떨어지는 짧은 길이라 답답하지 않고, 가성비를 먼저 따져보면, 보더패턴, 둥글게 내려오는 밑단, 가성비를 먼저 보게 되는데, 가성비를 먼저 보게 되는 옷인데, 옵션인데도, 44사이즈인 제게도.",
+      "다음 표현은 사용하지 마세요: 목을 조이지 않아서, 기본형, FREE라서, 가성비 기준으로 보면, 가격 생각하면, 가격을 생각하면, 46-50대인 저도, 가성비로 보면, 체형커버가 되는 쪽으로 보면, 체형커버로 보니, 가성비를 따져보면, 목에 닿는 부분이 까슬하지 않아서, 소매가 손목까지 와서 팔 움직일 때 허전하지 않았고, 라운드넥 반팔 티셔츠 디자인이다, 핏감이 생각보다 여유 있어서, 44~55 사이즈, 허리선 아래로 떨어지는 짧은 길이라 답답하지 않고, 가성비를 먼저 따져보면, 보더패턴, 둥글게 내려오는 밑단, 가성비를 먼저 보게 되는데, 가성비를 먼저 보게 되는 옷인데, 옵션인데도, 44사이즈인 제게도, 안감이 없는 편이라, 목선이 둥글게 잡혀 있어서, 반팔이라 팔동작도 편하고, 어깨선도 과하게 드러나지 않아, 안쪽이 따로 덧대어지지 않아, 움직일 때 답답함이 적어서 단독으로 입어도 편했어요, 군더더기 없어 깔끔하게 떨어집니다.",
+      "선택한 컬러명을 문장 앞에 붙여 '블랙이라도', '블랙인데도', '블랙인도게', '블랙 컬러라' 같은 식으로 이유를 만들지 마세요. 컬러를 말해야 할 때도 색상명보다 '색감', '배색', '톤'처럼 자연스러운 표현을 사용하세요.",
       "같은 상품의 앞 리뷰와 첫 문장의 시작 단어나 도입 방식이 비슷하면 완전히 다른 상황이나 표현으로 시작하세요.",
       sharedSellerReviewStyleGuide,
       queenitBestReviewStyleGuide,
@@ -839,8 +871,9 @@ const server = http.createServer(async (req, res) => {
       const product = await resolveProduct(String(body.productId || "").trim());
       if (product.imageUrl) allowedProductImages.add(product.imageUrl);
       const option = product.options.find((item) => item.code === body.optionCode) || product.options[0];
+      const optionLabel = String(body.optionLabel || "").trim() || option.label;
       const count = Math.max(1, Math.min(5, Number(body.count) || 5));
-      const generated = await makeAiReviews(product, option.label, Array.isArray(body.previousReviews) ? body.previousReviews : [], body.preferences || {}, count);
+      const generated = await makeAiReviews(product, optionLabel, Array.isArray(body.previousReviews) ? body.previousReviews : [], body.preferences || {}, count);
       return json(res, 200, { product, option, reviews: generated.reviews, source: generated.source, rateLimitResetAt });
     }
     if (req.method === "POST" && url.pathname === "/api/download") {

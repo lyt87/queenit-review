@@ -87,13 +87,19 @@ async function matchUploadedImages() {
     }
   }
   if (!uploadedImages.length || !states.size) { render(); return; }
-  const slots = [...states.values()].flatMap((state) => state.optionCodes.map((code, index) => ({ state, index, code })));
+  const slots = [...states.values()].flatMap((state) => state.optionCodes.map((code, index) => ({
+    state,
+    index,
+    code,
+    selectedOptionIndex: state.optionSelectionIndexes?.[index] ?? state.product.options.findIndex((item) => item.code === code),
+  })));
   const available = new Set(slots.map((_, index) => index));
   for (const uploaded of uploadedImages) {
     let best = null;
     for (const slotIndex of available) {
       const slot = slots[slotIndex];
-      const option = slot.state.product.options.find((item) => item.code === slot.code);
+      const option = slot.state.product.options[slot.selectedOptionIndex]
+        || slot.state.product.options.find((item) => item.code === slot.code);
       const productColorDistance = slot.state.productFeature ? rgbDistance(uploaded.feature.rgb, slot.state.productFeature.rgb) : 0.35;
       const productHistogramDistance = slot.state.productFeature ? histogramDistance(uploaded.feature.histogram, slot.state.productFeature.histogram) : 0.4;
       const productShapeDistance = slot.state.productFeature ? hashDistance(uploaded.feature.hash, slot.state.productFeature.hash) : 0.45;
@@ -193,13 +199,23 @@ function colorName(label) {
 
 function distributeOptions(options) {
   const colors = [];
-  for (const option of options) {
+  for (const [index, option] of options.entries()) {
     const color = colorName(option.label) || option.code;
-    if (!colors.some((item) => item.color === color)) colors.push({ color, option });
+    if (!colors.some((item) => item.color === color)) colors.push({ color, option, index });
   }
   const colorOptions = colors.map((item) => item.option);
   if (!colorOptions.length) return [];
   return Array.from({ length: 5 }, (_, index) => colorOptions[index % colorOptions.length].code);
+}
+
+function distributeOptionIndexes(options) {
+  const colors = [];
+  for (const [index, option] of options.entries()) {
+    const color = colorName(option.label) || option.code || String(index);
+    if (!colors.some((item) => item.color === color)) colors.push({ color, index });
+  }
+  if (!colors.length) return [];
+  return Array.from({ length: 5 }, (_, index) => colors[index % colors.length].index);
 }
 
 function allReviews(state) {
@@ -221,13 +237,20 @@ function render() {
       ? `<img class="product-image" src="${esc(product.imageUrl)}" alt="${esc(product.productName)}">`
       : '<div class="image-placeholder">이미지<br>없음</div>';
     const selectedCode = state.optionCodes[index];
+    const selectedOptionIndex = state.optionSelectionIndexes?.[index] ?? Math.max(0, product.options.findIndex((option) => option.code === selectedCode));
+    const selectedOption = product.options[selectedOptionIndex]
+      || product.options.find((option) => option.code === selectedCode)
+      || product.options[0];
     const matched = state.matchedImages?.[index];
     const matchedPreview = matched
       ? `<div class="matched-image-wrap"><img class="matched-image" src="${esc(matched.url)}" alt="${esc(matched.file.name)}"><span class="match-confidence">${esc(matched.confidence)}</span><small>${esc(matched.file.name)}</small></div>`
       : '<div class="match-empty">매칭<br>없음</div>';
-    const options = product.options.map((option) =>
-      `<option value="${esc(option.code)}" ${option.code === selectedCode ? "selected" : ""}>${esc(option.label)} · ${esc(option.code)}</option>`
+    const options = product.options.map((option, optionIndex) =>
+      `<option value="${optionIndex}" ${optionIndex === selectedOptionIndex ? "selected" : ""}>${esc(option.label)} · ${esc(option.code || "코드 입력 필요")}</option>`
     ).join("");
+    const codeMessage = selectedOption?.codeRequired || !selectedCode
+      ? `<small class="code-required">${esc(selectedOption?.message || "옵션코드를 입력해 주세요")}</small>`
+      : "";
     const toneOptions = ["간결하게", "다정하게", "편안하게", "솔직하게", "담백하게", "채팅"].map((tone) =>
       `<option value="${tone}" ${tone === state.tones[index] ? "selected" : ""}>${tone}</option>`
     ).join("");
@@ -238,7 +261,7 @@ function render() {
       ${first ? `<td rowspan="5"><button class="cell-button refresh-product">이 상품 리뷰<br>새로고침</button></td>
       <td rowspan="5" class="product-name-cell"><strong>${esc(product.productName)}</strong>${product.discovered ? '<small class="inferred">상세페이지 AI 분석 상품</small>' : ""}</td>
       <td rowspan="5">${image}</td><td rowspan="5" class="queenit-id-cell">${esc(product.productId)}</td>` : ""}
-      <td class="option-code-cell"><select class="option-select" title="${esc(product.options.find((option) => option.code === selectedCode)?.label || "")} · ${esc(selectedCode)}" aria-label="리뷰 ${index + 1} 옵션 컬러">${options}</select>${product.analysisNote && first ? `<small class="inferred">${esc(product.analysisNote)}</small>` : ""}</td>
+      <td class="option-code-cell"><select class="option-select" title="${esc(selectedOption?.label || "")} · ${esc(selectedCode || "옵션코드 입력 필요")}" aria-label="리뷰 ${index + 1} 옵션 컬러">${options}</select><input class="option-code-input" value="${esc(selectedCode)}" aria-label="리뷰 ${index + 1} 옵션코드 직접 수정" placeholder="옵션코드 입력">${codeMessage}${product.analysisNote && first ? `<small class="inferred">${esc(product.analysisNote)}</small>` : ""}</td>
       <td>${matchedPreview}</td>
       <td><select class="row-tone-select" aria-label="리뷰 ${index + 1} 말투 구분자">${toneOptions}</select></td>
       <td><select class="row-length-select" aria-label="리뷰 ${index + 1} 리뷰 길이 구분자">${lengthOptions}</select></td>
@@ -257,9 +280,27 @@ function render() {
   $$(".option-select", tbody).forEach((select) => select.addEventListener("change", async () => {
     const row = select.closest("tr");
     const state = states.get(row.dataset.id);
-    state.optionCodes[Number(row.dataset.index)] = select.value;
+    const index = Number(row.dataset.index);
+    const optionIndex = Number(select.value);
+    const option = state.product.options[optionIndex] || state.product.options[0];
+    state.optionSelectionIndexes[index] = optionIndex;
+    state.optionCodes[index] = option?.code || "";
+    row.querySelector(".option-code-input").value = option?.code || "";
     await refreshOne(row);
   }));
+  $$(".option-code-input", tbody).forEach((input) => {
+    input.addEventListener("input", () => {
+      const row = input.closest("tr");
+      const state = states.get(row.dataset.id);
+      state.optionCodes[Number(row.dataset.index)] = input.value.trim();
+    });
+    input.addEventListener("change", () => {
+      input.value = input.value.trim();
+      const row = input.closest("tr");
+      const state = states.get(row.dataset.id);
+      state.optionCodes[Number(row.dataset.index)] = input.value;
+    });
+  });
   $$(".row-tone-select", tbody).forEach((select) => select.addEventListener("change", async () => {
     const row = select.closest("tr");
     const state = states.get(row.dataset.id);
@@ -277,12 +318,17 @@ function render() {
 async function generateOne(state, index) {
   state.history.push(...allReviews(state));
   state.history = [...new Set(state.history)].slice(-40);
+  const selectedOptionIndex = state.optionSelectionIndexes?.[index] ?? state.product.options.findIndex((item) => item.code === state.optionCodes[index]);
+  const selectedOption = state.product.options[selectedOptionIndex]
+    || state.product.options.find((item) => item.code === state.optionCodes[index])
+    || state.product.options[0];
   const result = await request("/api/generate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       productId: state.product.productId,
       optionCode: state.optionCodes[index],
+      optionLabel: selectedOption?.label || "",
       previousReviews: state.history,
       preferences: { ...preferences(state.tones[index], state.lengths[index]), variantIndex: index + 1 },
       count: 1,
@@ -343,9 +389,12 @@ $("#loadButton").addEventListener("click", async () => {
     states.clear();
     for (const item of response.results) {
       if (!item.ok) { notify(`${item.productId}: ${item.message}`); continue; }
+      const optionSelectionIndexes = distributeOptionIndexes(item.product.options);
+      const optionCodes = optionSelectionIndexes.map((optionIndex) => item.product.options[optionIndex]?.code || "");
       states.set(item.product.productId, {
         product: item.product,
-        optionCodes: distributeOptions(item.product.options),
+        optionCodes,
+        optionSelectionIndexes,
         tones: Array(5).fill($("#tone").value),
         lengths: Array(5).fill($("#reviewLength").value),
         matchedImages: Array(5).fill(null),
@@ -405,6 +454,7 @@ $("#downloadImagesButton").addEventListener("click", async () => {
   const counters = new Map();
   const matched = [...states.values()].flatMap((state) => state.matchedImages.map((image, index) => ({ image, optionCode:state.optionCodes[index] }))).filter((item) => item.image);
   if (!matched.length) return notify("매칭된 이미지가 없습니다.");
+  if (matched.some((item) => !String(item.optionCode || "").trim())) return notify("옵션코드를 입력해 주세요.");
   const button = $("#downloadImagesButton"); busy(button, true, "ZIP 생성 중...");
   try {
     const files = [];
@@ -421,6 +471,8 @@ $("#downloadImagesButton").addEventListener("click", async () => {
 });
 
 $("#downloadButton").addEventListener("click", async () => {
+  const hasMissingCode = [...states.values()].some((state) => state.reviews.some((review, index) => review.trim() && !String(state.optionCodes[index] || "").trim()));
+  if (hasMissingCode) return notify("옵션코드를 입력해 주세요.");
   const entries = [...states.values()].flatMap((state) => state.reviews.map((review, index) => ({
     productId: state.product.productId,
     optionCode: state.optionCodes[index],
