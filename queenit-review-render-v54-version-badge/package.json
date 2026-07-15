@@ -1,0 +1,16 @@
+{
+  "name": "queenit-review-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.16",
+    "exceljs": "^4.4.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
